@@ -33,7 +33,7 @@ autobot has two control layers below the application. An agent builds runtime, p
 
 The application itself runs with a web interface that covers everything else.
 
-Build the checks for the local audio hardware on the NUC in one of these layers, as a plain `make` target or inside the terminal user interface, so that an agent can test and control the audio hardware itself. Neither layer exists yet. Each new target must appear in the bare `make` summary.
+Build the checks for the local audio hardware on the NUC in one of these layers, as a plain `make` target or inside the terminal user interface, so that an agent can test and control the audio hardware itself. The audio hardware check target is `make audio-check`. It runs on the NUC only. On any other machine, including the WSL test machine, it fails with a clear message, because the NUC's local audio hardware is what is being checked. Neither layer exists yet. Each new target must appear in the bare `make` summary.
 
 ## What not to touch
 
@@ -58,5 +58,3 @@ Build the checks for the local audio hardware on the NUC in one of these layers,
 ## Open Questions
 
 - Which exact test, lint and type-check commands will agents run? Decided only when the stack recommendation in ADR 0001 is accepted and the first code lands.
-- **Audio check target name.** What is the `make` target for the audio hardware check called? I recommend `make audio-check`, so that it reads clearly in the bare `make` summary.
-- **Where audio checks run.** Must the audio check work on the WSL test machine, or only on the NUC? I recommend the NUC only, failing with a clear message elsewhere, because the NUC's local audio hardware is what is being checked.

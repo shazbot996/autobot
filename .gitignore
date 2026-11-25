@@ -1,0 +1,9 @@
+# cr2: local state, never shared
+.cr2/transcript.json
+.cr2/session.json
+.cr2/local.json
+.cr2/runs.jsonl*
+.cr2/attachments/
+.cr2/graph/*/
+.cr2/story/
+prompts/*/DRAFT.prompt.md

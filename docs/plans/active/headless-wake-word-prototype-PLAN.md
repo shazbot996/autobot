@@ -17,6 +17,9 @@ provenance:
   - run: schiele/0024
     at: 2026-11-25T23:50:50.301Z
     mode: revise
+  - run: schiele/0025
+    at: 2026-11-26T01:12:56.652Z
+    mode: revise
 ---
 
 # Headless Wake-Word Prototype — Implementation Plan
@@ -116,14 +119,15 @@ The wake-word engine is the thing being built, not a thing being chosen off a sh
 
 ## 9. Choices the spec leaves open
 
-1. **Engine: openWakeWord with a custom-trained `autobot` model**, after a `text_match` bootstrap. The owner wants to build the engine, needs a machine-learning model, and wants it cheap to run all day. openWakeWord is local, Python, CPU-only and trains new phrases from synthetic speech, which answers WW-3 and keeps `CN-1`; the `text_match` bootstrap gets a working prototype on the NUC before training has finished.
+1. **Engine: openWakeWord with a custom-trained `autobot` model**, after a `text_match` bootstrap, rather than a classifier built from scratch. The owner wants to build the engine, needs a machine-learning model, and wants it cheap to run all day. openWakeWord is local, Python, CPU-only and trains new phrases from synthetic speech, which answers WW-3 and keeps `CN-1`; the `text_match` bootstrap gets a working prototype on the NUC before training has finished.
 2. **"Contains autobot"** is the detection rule for both kinds: `text_match` tests containment of the transcript, and the trained model fires on the phrase wherever it falls in the stream. Prefixes such as "hey" or "yo" are therefore free.
 3. **A wake phrase "kind" is the detector that implements it**: `openwakeword` (a trained model file) or `text_match` (a text pattern). New kinds are new `Detector` implementations.
-4. **The acknowledgement is spoken** ("Yes?" by default) with piper-tts, rendered once at startup, because the build is headless and there is no screen to show it on.
+4. **The acknowledgement is spoken** ("Yes?" by default) rather than a tone, with piper-tts, rendered once at startup, because the build is headless and there is no screen to show it on, and because it also proves the local TTS path the later specs depend on.
 5. **End of speech is detected by the Silero VAD** for the `text_match` buffer only; detecting the end of the query that follows a wake is deferred with WW-4.
 6. **Off the NUC the listener does not run.** `make audio-check` refuses; the service is not installed; tests run anywhere from fixtures. This follows `INFRASTRUCTURE.md`, which limits support to the NUC.
 7. **Configuration is TOML** in `config/autobot.toml`, read with `tomllib`, because the project already uses TOML for `pyproject.toml` and it needs no dependency.
 8. **The hand-off seam is a JSON line per `WakeEvent`** on `run/listener.sock` and in the log, so the routing layer of the next plan can be a separate process, as `ARCH.md` describes.
+9. **Training runs on the NUC's CPU**, not on the Windows dev server. The run may take hours; that is accepted, because `INFRASTRUCTURE.md` supports only the NUC and the training is a one-off that can run overnight, which is why `make train-wakeword` is resumable.
 
 ## 10. Out of scope
 
@@ -163,6 +167,4 @@ The wake-word engine is the thing being built, not a thing being chosen off a sh
 
 ## Open Questions
 
-- **Engine.** Is openWakeWord with a trained `autobot` model the right first engine, or does the owner want to build the classifier from scratch as with the Coral board? Recommended: openWakeWord, because it is local, trainable for new phrases from synthetic speech, and runs cheaply on the NUC's CPU, which is the whole of what the first step needs.
-- **Acknowledgement.** Should the wake be answered with a spoken word ("Yes?") or a short tone? Recommended: a spoken word rendered once by piper-tts, because it also proves the local TTS path the later specs depend on.
-- **Where training runs.** Training the `autobot` model on the NUC's CPU may take hours. Is that acceptable, or should training run on the Windows dev server and the model be copied to the NUC? Recommended: train on the NUC, because `INFRASTRUCTURE.md` supports only the NUC and the training is a one-off that can run overnight.
+None.

@@ -19,14 +19,24 @@ Stages, each cached under `models/wakeword/work/<phrase>/`:
    so 13 model inputs, each labelled by where the phrase ends in it.
 3. **train**: a small network on the 16 x 96 features, against those windows
    and openWakeWord's general negative features. Checkpointed every 1000
-   steps (`ckpt-<hidden>-<steps>.pt`: one per network size and schedule, so
-   trying another does not throw a finished run away).
+   steps (`ckpt-<hidden>-<steps>.pt`: one per network size, schedule and
+   loss, so trying another does not throw a finished run away).
 4. **eval**: recall on voices never used in training, false accepts on hard
    negatives, and false accepts per hour on openWakeWord's validation
-   features, for a sweep of thresholds.
+   features, for a sweep of thresholds. The hard negatives that sound the
+   same as the phrase (`PhraseTable.train_excluded`) are reported on their
+   own and are not counted with the others.
 5. **install**: the ONNX file and a `.json` of the metrics are moved into
    place with `os.replace`, so a running listener never reads half a file.
    The model that was there is kept as `<name>.prev.onnx`.
+
+Three options change what the network is trained against, for comparing
+models on the same cached features: `--exclude-near-homophones` leaves the
+windows of `PhraseTable.train_excluded` out of the training,
+`--hard-topk-weight` weights the loss on the hardest hard negatives (0 drops
+it) and `--negative-weight` weights every negative term. `--name` writes the
+result to `candidates/<name>.onnx` beside the installed model and leaves the
+installed model alone.
 
 Shards are additive: a larger `--scale` adds shards and keeps every finished
 one, so a short first run is not wasted. A shard is identified by its name
@@ -135,6 +145,9 @@ THRESHOLDS = (
 # is more than a room produces in an hour; holding it to one every two hours
 # instead costs about 15 points of recall.
 TARGET_FALSE_ACCEPTS_PER_HOUR = 1.0
+# Thresholds the log shows for the phrases that sound like the wake phrase;
+# the metrics file has every threshold.
+NEAR_LOG_THRESHOLDS = (0.5, 0.7, 0.9)
 # Below this recall a threshold is not worth recommending.
 MIN_USEFUL_RECALL = 0.65
 
@@ -697,17 +710,53 @@ def label_windows(meta: Int64) -> npt.NDArray[np.int8]:
     return labels
 
 
+def excluded_ids(table: PhraseTable) -> list[int]:
+    """The hard-negative ids of `table.train_excluded`: every position of each."""
+    return [i for i, text in enumerate(table.hard) if text in table.train_excluded]
+
+
+def excluded_windows(meta: Int64, table: PhraseTable) -> npt.NDArray[np.bool_]:
+    """Which windows hold a hard negative that sounds the same as the phrase.
+
+    `meta` is the window meta of `feats_shard`. Only hard-negative windows
+    are ever chosen: the ids of other kinds are not looked at.
+    """
+    chosen: npt.NDArray[np.bool_] = (meta[:, 0] == KIND_HARD) & np.isin(
+        meta[:, 1], excluded_ids(table)
+    )
+    return chosen
+
+
 def load_features(
-    work: Path, shards: Sequence[Shard], split: str
+    work: Path,
+    shards: Sequence[Shard],
+    split: str,
+    keep: Callable[[Int64], npt.NDArray[np.bool_]] | None = None,
 ) -> tuple[npt.NDArray[np.float16], Int64]:
-    """The features and window meta of every shard of a split, in plan order."""
+    """The features and window meta of every shard of a split, in plan order.
+
+    `keep` takes a shard's window meta and says which windows to load.
+    """
     features: list[npt.NDArray[np.float16]] = []
     meta: list[Int64] = []
     for shard in shards:
         if shard.split == split:
             stored = np.load(feat_path(work, shard))
-            features.append(stored["X"])
-            meta.append(stored["meta"])
+            shard_meta: Int64 = stored["meta"]
+            if keep is None:
+                features.append(stored["X"])
+                meta.append(shard_meta)
+                continue
+            chosen = keep(shard_meta)
+            if chosen.any():
+                features.append(stored["X"][chosen])
+                meta.append(shard_meta[chosen])
+    if not features:
+        # Nothing was chosen: no windows, of no particular length.
+        return (
+            np.zeros((0, MODEL_EMBEDDINGS, EMBEDDING_SIZE), dtype=np.float16),
+            np.zeros((0, 5), dtype=np.int64),
+        )
     return np.concatenate(features), np.concatenate(meta)
 
 
@@ -810,6 +859,14 @@ class Run:
     steps: int
     hidden: int
     threads: int
+    # Leave the windows of `PhraseTable.train_excluded` out of the training.
+    exclude_near: bool = False
+    # Weight of the loss on the hardest 5 % of the hard negatives; 0 drops it.
+    hard_topk: float = 1.0
+    # Weight of every negative term of the loss.
+    negative_weight: float = 1.0
+    # A candidate is written beside the installed model, not over it.
+    candidate: bool = False
 
     @property
     def data(self) -> Path:
@@ -817,12 +874,41 @@ class Run:
 
     @property
     def checkpoint(self) -> Path:
-        return self.work / f"ckpt-{self.hidden}-{self.steps}.pt"
+        return self.work / f"ckpt-{self.hidden}-{self.steps}{self.variant}.pt"
+
+    @property
+    def variant(self) -> str:
+        """What tells this run's loss from the first one's; empty for that one."""
+        settings = (self.exclude_near, self.hard_topk, self.negative_weight)
+        if settings == (False, 1.0, 1.0):
+            return ""
+        return (
+            f"-x{int(self.exclude_near)}-k{self.hard_topk:g}-n{self.negative_weight:g}"
+        )
+
+
+# What a checkpoint written before these settings existed was trained with.
+CHECKPOINT_DEFAULTS: dict[str, Any] = {
+    "excluded": [],
+    "hard_topk": 1.0,
+    "negative_weight": 1.0,
+}
 
 
 def checkpoint_matches(saved: dict[str, Any], wanted: dict[str, Any]) -> bool:
-    """Whether a checkpoint was made by the same run: same data, same schedule."""
+    """Whether a checkpoint was made by the same run: same data, schedule and loss."""
+    saved = {**CHECKPOINT_DEFAULTS, **saved}
     return all(saved.get(key) == value for key, value in wanted.items())
+
+
+def training_inputs(
+    meta: Int64, table: PhraseTable, exclude_near: bool
+) -> npt.NDArray[np.int8]:
+    """`label_windows`, with every input of an excluded window ignored (-1)."""
+    labels = label_windows(meta)
+    if exclude_near:
+        labels[excluded_windows(meta, table)] = -1
+    return labels
 
 
 def stage_train(run: Run, shards: Sequence[Shard]) -> Any:
@@ -839,12 +925,16 @@ def stage_train(run: Run, shards: Sequence[Shard]) -> Any:
     acav = load_acav(run.data)
     # The last 5 % of the general negatives are kept back for the evaluation.
     acav_rows = int(len(acav) * 0.95)
+    table = phrase_table(run.phrase)
     identity = {
         "phrase": run.phrase,
         "steps": run.steps,
         "hidden": run.hidden,
         "sequences": len(features),
         "acav_rows": acav_rows,
+        "excluded": sorted(table.train_excluded) if run.exclude_near else [],
+        "hard_topk": run.hard_topk,
+        "negative_weight": run.negative_weight,
     }
     step = 0
     if run.checkpoint.exists():
@@ -861,7 +951,13 @@ def stage_train(run: Run, shards: Sequence[Shard]) -> Any:
         log("train: already complete")
         return net
 
-    labels = label_windows(meta)
+    labels = training_inputs(meta, table, run.exclude_near)
+    if run.exclude_near:
+        left_out = int(excluded_windows(meta, table).sum())
+        log(
+            f"train: left out {left_out} windows of {len(table.train_excluded)} hard "
+            "negatives that sound the same as the phrase"
+        )
     positive_window, positive_input = np.nonzero(labels == 1)
     negative_window, negative_input = np.nonzero(labels == 0)
     if not len(positive_window):
@@ -896,13 +992,18 @@ def stage_train(run: Run, shards: Sequence[Shard]) -> Any:
             net.logits(general), torch.zeros(1536, 1), reduction="none"
         )[:, 0]
         # Negatives: the mean, plus the mean of the hardest 5 %, which keeps
-        # the pressure on the rare false accept.
+        # the pressure on the rare false accept. With both weights at 1 this
+        # is the first model's loss, to the bit.
+        weight = run.negative_weight
+        loss = positive_loss + weight * negative_loss.mean()
+        if run.hard_topk > 0:
+            loss = loss + (weight * run.hard_topk) * (
+                negative_loss.topk(20).values.mean()
+            )
         loss = (
-            positive_loss
-            + negative_loss.mean()
-            + negative_loss.topk(20).values.mean()
-            + 2 * general_loss.mean()
-            + general_loss.topk(77).values.mean()
+            loss
+            + (2 * weight) * general_loss.mean()
+            + weight * general_loss.topk(77).values.mean()
         )
         optimiser.zero_grad()
         loss.backward()
@@ -965,10 +1066,14 @@ def stage_eval(run: Run, shards: Sequence[Shard], net: Any) -> dict[str, Any]:
     kind, hard_id = meta[:, 0], meta[:, 1]
     unseen_ids = [i for i, text in enumerate(table.hard) if text in table.eval_only]
     unseen = np.isin(hard_id, unseen_ids)
+    # Reported on their own whether or not this run trained on them, so runs
+    # that did and runs that did not are compared on the same clips.
+    near = excluded_windows(meta, table)
     groups = {
         "pos": kind == KIND_POSITIVE,
-        "hard_seen": (kind == KIND_HARD) & ~unseen,
-        "hard_unseen": (kind == KIND_HARD) & unseen,
+        "hard_seen": (kind == KIND_HARD) & ~unseen & ~near,
+        "hard_unseen": (kind == KIND_HARD) & unseen & ~near,
+        "hard_near": near,
         "generic": kind == KIND_GENERIC,
         "noise": kind == KIND_NOISE,
     }
@@ -997,6 +1102,7 @@ def stage_eval(run: Run, shards: Sequence[Shard], net: Any) -> dict[str, Any]:
             "recall": _rate(peaks, groups["pos"], threshold),
             "fa_hard_seen": _rate(peaks, groups["hard_seen"], threshold),
             "fa_hard_unseen": _rate(peaks, groups["hard_unseen"], threshold),
+            "fa_hard_near": _rate(peaks, groups["hard_near"], threshold),
             "fa_generic": _rate(peaks, groups["generic"], threshold),
             "fa_noise": _rate(peaks, groups["noise"], threshold),
             "val_fa_per_hour": count_events(validation_scores, threshold)
@@ -1011,8 +1117,9 @@ def stage_eval(run: Run, shards: Sequence[Shard], net: Any) -> dict[str, Any]:
             f"{row['acav_fa_per_hour']:9.2f}"
         )
     best = recommend(rows)
+    near_rows = near_homophones(run, shards, net, table, peaks, meta)
     worst: list[tuple[float, int, str]] = []
-    for identifier in np.unique(hard_id[kind == KIND_HARD]):
+    for identifier in np.unique(hard_id[(kind == KIND_HARD) & ~near]):
         chosen = (kind == KIND_HARD) & (hard_id == identifier)
         worst.append(
             (
@@ -1048,12 +1155,97 @@ def stage_eval(run: Run, shards: Sequence[Shard], net: Any) -> dict[str, Any]:
             {"text": text, "false_accept_rate": rate, "clips": count}
             for rate, count, text in worst[:20]
         ],
+        "near_homophones": {
+            "trained_on": not run.exclude_near,
+            "note": "hard negatives that sound the same as the phrase, not counted "
+            "in fa_hard_seen; 'heldout' is clips in voices never trained on, "
+            "'train_voices' is 3 s training windows in the training voices",
+            "phrases": near_rows,
+        },
         "scale": run.scale,
         "steps": run.steps,
         "hidden": run.hidden,
+        "exclude_near_homophones": run.exclude_near,
+        "hard_topk_weight": run.hard_topk,
+        "negative_weight": run.negative_weight,
         "arch": "mlp",
         "trained": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
+
+
+# A training window counts towards `near_homophones` when its key words end
+# at least half a second before the last model input does, so the inputs that
+# would fire on it are all in the window.
+NEAR_LATEST_KEY_END = (
+    INPUT_END_SAMPLE + FRAME_SAMPLES * (SEQUENCE_INPUTS - 1) - SAMPLE_RATE // 2
+)
+
+
+def near_homophones(
+    run: Run,
+    shards: Sequence[Shard],
+    net: Any,
+    table: PhraseTable,
+    heldout_peaks: Float32,
+    heldout_meta: Int64,
+) -> list[dict[str, Any]]:
+    """How often the model fires on each phrase of `table.train_excluded`.
+
+    The held-out clips have few of these phrases, or none, so each is also
+    scored on its training windows. Those are in the training voices: for a
+    run with `exclude_near` the model never saw the phrase but knows the
+    voice; for a run without, it was trained on these very windows.
+    """
+    if not table.train_excluded:
+        return []
+
+    def usable(meta: Int64) -> npt.NDArray[np.bool_]:
+        early: npt.NDArray[np.bool_] = meta[:, 4] <= NEAR_LATEST_KEY_END
+        return excluded_windows(meta, table) & early
+
+    features, meta = load_features(run.work, shards, SPLIT_TRAIN, usable)
+    peaks = (
+        clip_scores(net, features) if len(features) else np.zeros(0, dtype=np.float32)
+    )
+    rows: list[dict[str, Any]] = []
+    for text in sorted(table.train_excluded):
+        identifier = table.hard.index(text)
+        held = (heldout_meta[:, 0] == KIND_HARD) & (heldout_meta[:, 1] == identifier)
+        seen = meta[:, 1] == identifier
+        rows.append(
+            {
+                "text": text,
+                "heldout_clips": int(held.sum()),
+                "train_voice_windows": int(seen.sum()),
+                "heldout": {
+                    str(threshold): _rate(heldout_peaks, held, threshold)
+                    for threshold in THRESHOLDS
+                },
+                "train_voices": {
+                    str(threshold): _rate(peaks, seen, threshold)
+                    for threshold in THRESHOLDS
+                },
+            }
+        )
+    trained = "trained on" if not run.exclude_near else "left out of the training"
+    shown = "/".join(str(threshold) for threshold in NEAR_LOG_THRESHOLDS)
+    log(
+        f"eval: phrases that sound the same as {run.phrase!r} ({trained}), fired on "
+        f"at {shown}: training voices, then held-out voices"
+    )
+    for row in rows:
+        seen_rates = " ".join(
+            f"{row['train_voices'][str(t)]:.3f}" for t in NEAR_LOG_THRESHOLDS
+        )
+        held_rates = " ".join(
+            f"{row['heldout'][str(t)]:.3f}" for t in NEAR_LOG_THRESHOLDS
+        )
+        log(
+            f"eval:   {row['text']!r:18s} {seen_rates} "
+            f"({row['train_voice_windows']} windows)  {held_rates} "
+            f"({row['heldout_clips']} clips)"
+        )
+    return rows
 
 
 def _rate(peaks: Float32, chosen: npt.NDArray[np.bool_], threshold: float) -> float:
@@ -1190,7 +1382,14 @@ def train(run: Run, stage: str) -> None:
     log(
         f"training the wake-word model for {run.phrase!r}: scale {run.scale:g} "
         f"({len(shards)} shards), {run.steps} steps, {run.threads} threads; "
-        f"{len(set(table.trained))} hard negatives; work in {run.work}"
+        f"{len(set(table.trained))} hard negatives"
+        + (
+            f", {len(table.train_excluded)} of them left out of the training"
+            if run.exclude_near
+            else ""
+        )
+        + f"; hard top-k weight {run.hard_topk:g}, negative weight "
+        f"{run.negative_weight:g}; work in {run.work}"
     )
     stage_synth(run, shards)
     if stage == "synth":
@@ -1220,6 +1419,12 @@ def train(run: Run, stage: str) -> None:
             else ""
         )
     )
+    if run.candidate:
+        log(
+            f"done in {(time.time() - started) / 60:.1f} min. {run.output.name} is a "
+            "candidate: the installed model and the configuration are unchanged."
+        )
+        return
     log(
         f"done in {(time.time() - started) / 60:.1f} min. Set threshold = "
         f"{metrics['recommended_threshold']} for {run.phrase!r} in "
@@ -1254,6 +1459,31 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hidden", type=int, default=128, help="width of the layers")
     parser.add_argument("--threads", type=int, default=6, help="worker processes")
     parser.add_argument(
+        "--exclude-near-homophones",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="leave the hard negatives that sound the same as the phrase out of "
+        "the training (they are still evaluated, on their own)",
+    )
+    parser.add_argument(
+        "--hard-topk-weight",
+        type=float,
+        default=1.0,
+        help="weight of the loss on the hardest 5%% of the hard negatives; 0 drops it",
+    )
+    parser.add_argument(
+        "--negative-weight",
+        type=float,
+        default=1.0,
+        help="weight of every negative term of the loss",
+    )
+    parser.add_argument(
+        "--name",
+        default=None,
+        help="train a candidate: write candidates/<name>.onnx beside the model "
+        "file and leave the installed model alone",
+    )
+    parser.add_argument(
         "--work", type=Path, default=None, help="where the stages cache their work"
     )
     parser.add_argument(
@@ -1280,6 +1510,16 @@ def resolve_run(args: argparse.Namespace) -> Run:
         raise TrainError(f"the model file must end in .onnx, not {output.name!r}")
     if args.steps < 1 or args.hidden < 1 or args.threads < 1:
         raise TrainError("--steps, --hidden and --threads must be at least 1")
+    if args.hard_topk_weight < 0 or args.negative_weight <= 0:
+        raise TrainError(
+            "--hard-topk-weight must be at least 0 and --negative-weight above 0"
+        )
+    if args.name is not None:
+        if slug(args.name) != args.name:
+            raise TrainError(
+                f"--name must be lower-case letters, digits and '_', not {args.name!r}"
+            )
+        output = output.parent / "candidates" / f"{args.name}.onnx"
     work: Path = args.work or resolve_repo_path(
         WAKEWORD_MODELS_DIR / "work" / slug(phrase)
     )
@@ -1292,6 +1532,10 @@ def resolve_run(args: argparse.Namespace) -> Run:
         steps=args.steps,
         hidden=args.hidden,
         threads=min(args.threads, os.cpu_count() or 1),
+        exclude_near=args.exclude_near_homophones,
+        hard_topk=args.hard_topk_weight,
+        negative_weight=args.negative_weight,
+        candidate=args.name is not None,
     )
 
 

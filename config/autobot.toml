@@ -43,7 +43,7 @@ model = "models/wakeword/autobot.onnx"
 # Score from 0 to 1 at which the detector fires. Higher means fewer false
 # accepts and more misses; autobot.json lists both for a sweep of thresholds
 # and recommends one. For "text_match" use 0.5.
-threshold = 0.9
+threshold = 0.85
 target = "ack"
 
 [ack]

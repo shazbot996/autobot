@@ -179,6 +179,12 @@ class PhraseTable:
     hard: tuple[str, ...]
     # Hard negatives kept out of training, so the evaluation has unseen ones.
     eval_only: frozenset[str]
+    # Hard negatives a voice says the same as the phrase, or one sound away
+    # from it. Their clips are synthesised like any other, so the cached
+    # shards hold them, but `--exclude-near-homophones` leaves their windows
+    # out of the training, and the evaluation always reports them on their
+    # own. Texts, not ids, so appending to `hard` cannot move them.
+    train_excluded: frozenset[str] = frozenset()
 
     @property
     def trained(self) -> tuple[str, ...]:
@@ -229,12 +235,29 @@ _AUTOBOT_EVAL_ONLY = frozenset(
         *("audiobooks", "a lot of bats", "auto bulb"),
     }
 )
+# Hard negatives that are "autobot" to the ear, or one sound from it:
+# - "auto bought", "auto bought it": "bought" is "bot" wherever "cot" and
+#   "caught" are said alike, which is most American voices;
+# - "ought to bought", "oughta but": the same with a reduced "to", and "but"
+#   with the nearest vowel to "bot";
+# - "auto boot", "auto boat": one vowel away;
+# - "auto bob", "auto dot", "auto pot": one consonant away.
+# Phrases two or more sounds away ("auto bath", "auto bid", "auto part",
+# "ought to bet", "order bot", "auto box", "autobus", "autoboard") are not
+# here: they are different words and stay trained negatives.
+_AUTOBOT_TRAIN_EXCLUDED = frozenset(
+    {
+        *("auto bought", "auto bought it", "ought to bought", "oughta but"),
+        *("auto boot", "auto boat", "auto bob", "auto dot", "auto pot"),
+    }
+)
 
 PHRASE_TABLES: dict[str, PhraseTable] = {
     "autobot": PhraseTable(
         spellings=(*["autobot"] * 8, "Autobot", "auto bot"),
         hard=_AUTOBOT_HARD_V1 + _AUTOBOT_HARD_V2,
         eval_only=_AUTOBOT_EVAL_ONLY,
+        train_excluded=_AUTOBOT_TRAIN_EXCLUDED,
     ),
 }
 

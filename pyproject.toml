@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autobot"
+version = "0.1.0"
+description = "A personal always-on voice assistant: local wake word, local speech, local agent memory."
+readme = "README.md"
+requires-python = ">=3.12"
+# Runtime dependencies are added by the plan step that first needs them
+# (docs/plans/active/headless-wake-word-prototype-PLAN.md). Every audio and
+# speech dependency must run locally: CONSTRAINTS.md CN-1 and CN-2.
+dependencies = [
+    "faster-whisper>=1.1",
+    "numpy>=1.26",
+    "onnxruntime>=1.17",
+    "piper-tts>=1.3",
+    "sounddevice>=0.4.6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.10",
+    "pytest>=8",
+    "ruff>=0.5",
+]
+# Only `make train-wakeword` needs these; it installs them on first use, with
+# the CPU build of torch. The listener and the tests run without them.
+train = [
+    "onnx>=1.16",
+    "scipy>=1.11",
+    "soundfile>=0.12",
+    "torch>=2.4",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+src = ["src", "tests"]
+target-version = "py312"
+# CR2's documents and run records are not code and are never reformatted.
+extend-exclude = ["docs", "prompts", ".cr2"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src", "tests"]
+strict = true
+
+[[tool.mypy.overrides]]
+module = ["faster_whisper", "onnxruntime", "sounddevice"]
+ignore_missing_imports = true
+
+# The `train` extra. It is installed on some machines and not on others, so
+# these are never followed: the code type-checks the same either way.
+[[tool.mypy.overrides]]
+module = ["onnx", "onnx.*", "scipy", "scipy.*", "soundfile", "torch", "torch.*"]
+follow_imports = "skip"
+ignore_missing_imports = true

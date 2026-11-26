@@ -1,0 +1,52 @@
+# autobot configuration. This file is the only place configuration lives; the
+# terminal user interface (`make deploy`) is a front for it, not a second store.
+# Loaded and validated by src/autobot/config.py. Set AUTOBOT_CONFIG to load a
+# different file.
+
+[host]
+# Hostname of the Intel NUC. `make audio-check` refuses to run on any other
+# host, and when this is empty.
+nuc_hostname = "branch"
+
+[audio]
+# A device is a case-insensitive substring of a name in the `make audio-check`
+# device list (an exact name wins over a substring), or a numeric index.
+# Prefer names: indexes move when hardware is plugged in.
+#
+# "pipewire" is the ALSA device that PipeWire provides. It follows PipeWire's
+# default source and sink, which on the NUC are:
+#   source: AIRHUG 21 (USB microphone, ALSA card 1; it has no playback side)
+#   sink:   Built-in Audio Analog Stereo (HDA Intel PCH ALC256, ALSA card 0)
+# Change them with `wpctl status` and `wpctl set-default <id>`.
+#
+# The raw hardware devices ("AIRHUG 21: USB Audio (hw:1,0)" and
+# "HDA Intel PCH: ALC256 Analog (hw:0,0)") do not work here: they reject
+# 16 kHz ("Invalid sample rate"; the AIRHUG captures at 48 kHz only) and
+# PipeWire holds them open. PipeWire resamples to 16 kHz for us.
+input_device = "pipewire"
+output_device = "pipewire"
+sample_rate = 16000
+frame_ms = 80
+
+[[wake_phrases]]
+phrase = "autobot"
+# kind is the detector that implements the phrase:
+#   "openwakeword"  a model trained for the phrase scores the audio. Cheap
+#                   enough to run all day. Needs `model`.
+#   "text_match"    the local transcript contains the phrase. The fallback: it
+#                   needs no trained model, but transcribes all speech it hears.
+kind = "openwakeword"
+# Path of the model file, relative to the repository root. Required for
+# "openwakeword", unused by "text_match". `make train-wakeword` writes it,
+# with its evaluation beside it (autobot.json).
+model = "models/wakeword/autobot.onnx"
+# Score from 0 to 1 at which the detector fires. Higher means fewer false
+# accepts and more misses; autobot.json lists both for a sweep of thresholds
+# and recommends one. For "text_match" use 0.5.
+threshold = 0.9
+target = "ack"
+
+[ack]
+text = "Yes?"
+# A piper-tts voice name. Synthesis is local (CONSTRAINTS.md CN-2).
+voice = "en_US-lessac-medium"

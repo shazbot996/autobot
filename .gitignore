@@ -7,3 +7,22 @@
 .cr2/graph/*/
 .cr2/story/
 prompts/*/DRAFT.prompt.md
+
+# python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# autobot: runtime state (pid file, log, socket) and model files, never committed
+run/
+models/
+
+# secrets
+.env
+.env.*

@@ -1,0 +1,39 @@
+# autobot wake-word listener: systemd user unit (template).
+#
+# This file is a template. `@REPO_ROOT@` stands for the absolute path of the
+# repository checkout; `python -m autobot.listener.control install` (the
+# Service screen of `make deploy`) substitutes it and writes the result to
+# ~/.config/systemd/user/autobot-listener.service. Do not copy it by hand.
+#
+# Once installed, `make up`, `make down` and `make status` drive this unit.
+# It starts at boot, with nobody logged in, when it is enabled and the user
+# has lingering on (`loginctl enable-linger`).
+
+[Unit]
+Description=autobot wake-word listener
+Documentation=file://@REPO_ROOT@/docs/plans/active/headless-wake-word-prototype-PLAN.md
+# The listener reads the microphone through PipeWire.
+Wants=pipewire.service wireplumber.service
+After=pipewire.service wireplumber.service
+
+[Service]
+Type=simple
+WorkingDirectory=@REPO_ROOT@
+ExecStart=@REPO_ROOT@/.venv/bin/python -m autobot.listener
+Environment=PYTHONUNBUFFERED=1
+# No telemetry from onnxruntime: the listener makes no network calls. The
+# listener sets this itself as well (autobot.listener.models).
+Environment=ORT_DISABLE_TELEMETRY=1
+# The same log `make up` writes without the unit, so `make logs` is one command.
+StandardOutput=append:@REPO_ROOT@/run/listener.log
+StandardError=inherit
+# Exit status 1 is a fault that may pass (the audio device was not ready):
+# try again. Status 2 will not pass (configuration, a missing model, the
+# wrong host): stay down until someone fixes it.
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus=2
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target

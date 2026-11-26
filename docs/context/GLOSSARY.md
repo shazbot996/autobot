@@ -13,13 +13,19 @@ The glossary is autobot's vocabulary: the words the project uses, what each mean
 
 **Gemini ADK.** Google's Agent Development Kit, the SDK autobot uses to define and run its AI agents against Gemini models served from the owner's Google Cloud project. The ADK runs the agent's reasoning; autobot keeps the agent's state locally. Not a speech service, and not where agent memory lives.
 
-**faster-whisper.** The local speech-to-text engine the owner has had good results with and that ADR 0003 proposes for autobot. It turns speech captured after a wake phrase into a transcript on the local machine. Not a cloud API; never called over the network.
+**faster-whisper.** The local speech-to-text engine the owner has had good results with, proposed for autobot by ADR 0003 and accepted by ADR 0004. It turns speech captured after a wake phrase into a transcript on the local machine. Its first use is inside the `text_match` detector, with the `tiny.en` model. Not a cloud API; never called over the network.
 
-**piper-tts.** The local text-to-speech engine the owner has had good results with and that ADR 0003 proposes for autobot. It speaks the assistant's responses in a configurable voice on the local machine. Not a cloud API.
+**piper-tts.** The local text-to-speech engine the owner has had good results with, proposed for autobot by ADR 0003 and accepted by ADR 0004. It speaks the assistant's responses in a configurable voice on the local machine. Its first uses are the listener's acknowledgement and the synthetic speech the wake-word model is trained on. Not a cloud API.
 
-**NUC.** The dedicated Intel NUC running Ubuntu that is the intended 24x7 home of autobot, with its own local audio hardware. Not the development machine.
+**openWakeWord.** The local wake-word engine autobot uses (ADR 0005): an open-source project that turns audio into speech embeddings with a shared feature extractor, two small ONNX models, and scores them with a small model trained for one phrase. autobot takes the feature extractor and the method from it, trains its own model for the phrase `autobot` from synthetic speech (`make train-wakeword`), and runs all three models on the NUC's CPU with `onnxruntime`; the `openwakeword` Python package itself is not used. It is the `openwakeword` kind of wake phrase. Not a cloud service, and not speech-to-text: it recognises only the phrase it was trained for.
 
-**WSL.** The Windows Subsystem for Linux layer on the owner's Windows 11 dev server, used to test autobot. Not the production host.
+**Silero VAD.** The local voice-activity detection model the listener runs on every frame of audio to tell speech from silence. The listener's speech gate uses it so that silence never reaches a detector, and to find where a stretch of speech ends. Not a wake-word detector: it knows that someone is speaking, not what is said.
+
+**WakeEvent.** The record the listener publishes when it hears a wake phrase: the phrase, its target, the kind of detector that heard it, a score and the time. It is written as one JSON line to the listener's log and to `run/listener.sock`; see `SCHEMA.md`. Not the query: nothing of what was said after the wake phrase is in it.
+
+**NUC.** The dedicated Intel NUC running Ubuntu that is the 24x7 home of autobot, with its own local audio hardware. Its hostname is `branch`. It is the only machine autobot supports, and builds are run on it.
+
+**WSL.** The Windows Subsystem for Linux layer on the owner's Windows 11 dev server. autobot does not support it: support is limited to the NUC (`INFRASTRUCTURE.md`). Not a test machine for autobot.
 
 **PWA.** A progressive web app: the form the owner describes for autobot's user interface, probably shown full-screen in Chrome on the local host. Not a keyboard-and-mouse application; see wall UI.
 
@@ -34,6 +40,10 @@ The glossary is autobot's vocabulary: the words the project uses, what each mean
 **wake-word modeling.** The local detection of wake phrases in the microphone stream, including making new kinds of wake phrases configurable. Always local, never a cloud service (`CN-1`). Not speech-to-text: it recognises only wake phrases.
 
 **listener.** The always-on local process that reads the microphone, detects wake phrases, and hands the speech that follows to speech-to-text. Not the agent host and not the UI.
+
+**kind.** The kind of a wake phrase is the detector that implements it, named by the phrase's `kind` field: `openwakeword`, a model file trained for the phrase, or `text_match`, a test of whether the local transcript of a stretch of speech contains the phrase (WW-7). Not the phrase itself: two phrases can share a kind, and one phrase has one kind.
+
+**acknowledgement.** The short phrase, "Yes?" by default, that the listener says aloud when it hears a wake phrase whose target is `ack` (WW-8). It is synthesised locally with piper-tts, once, when the listener starts. Not an agent's response.
 
 **STT.** Speech-to-text: turning captured speech into a transcript. In autobot it is always local (`CN-1`). Not wake-word detection, which runs before it.
 
@@ -63,5 +73,4 @@ The glossary is autobot's vocabulary: the words the project uses, what each mean
 
 ## Open Questions
 
-- What is the name of the local wake-word engine? The intake names none, so this glossary has no entry for it.
 - Should "wake word", "wake keyword" and "activation phrase" be collapsed into "wake phrase" in all documents, as this glossary does, or does the owner distinguish them?

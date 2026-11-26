@@ -70,6 +70,9 @@ provenance:
   - run: schiele/0034
     at: 2026-11-26T17:01:14.068Z
     mode: revise
+  - run: schiele/0035
+    at: 2026-11-26T17:04:53.416Z
+    mode: revise
 ---
 
 # Wake-Word Training Studio — Implementation Plan
@@ -203,7 +206,7 @@ Implements the autobot — Wake-Word Training Studio spec (`docs/specs/active/au
 **Files:** new `src/autobot/tui/screens/dataset.py`; modified `src/autobot/wakeword/dataset.py`, `src/autobot/tui/screens/main.py`, `tests/wakeword/test_dataset.py`, `tests/tui/test_tui_app.py`, `tests/fixtures/audio/README.md`.
 
 - `dataset.py` gains `export_fixture(record, source, destination, lead_in=0.5, tail=1.0)`: pads with silence so the voiced span has at least the lead-in before and tail after, writes 16 kHz mono WAV. `FIXTURE_NAMES` is read from the README's table at test time to keep them in step.
-- `screens/dataset.py`: a scrollable list of manifest clips (speaker, label, prompt, seconds, split), P play, D delete (confirm), E export: `pick` one of the README fixture names, confirm overwriting, write into `services.fixture_dir`. The facts show the counts and minutes.
+- `screens/dataset.py`: a scrollable list of manifest clips (speaker, label, prompt, seconds, split), P play, D delete (the confirmation says that deleting a clip changes the held-out set and makes earlier evaluations incomparable), E export: `pick` one of the README fixture names, confirm overwriting, write into `services.fixture_dir`. The facts show the counts and minutes.
 - README: fixtures are exported from the Dataset screen, clip by clip; the "saved from the Audio screen" paragraph goes.
 
 **Done when:** choosing a clip and E, then `autobot.wav`, writes `tests/fixtures/audio/autobot.wav` with at least 0.5 s of quiet before and 1 s after the speech, and `make test` still passes on the new fixture.
@@ -254,6 +257,8 @@ Implements the autobot — Wake-Word Training Studio spec (`docs/specs/active/au
 7. **Label of an Audio-screen clip.** The save asks which of the three labels applies and records `prompt = "audio screen"`, `source = "session"`.
 8. **After install or revert** the interface offers to restart a running listener with `control down` and `up`, since the listener loads its model at start.
 9. **The real-set recommendation** reuses `recommend` with ambient false accepts per hour in the validation stream's place and the same one-per-hour target.
+10. **Hard-negative count per session.** The script asks for twenty sound-alikes, `train_excluded` first, although the table has over a hundred, because a session should fit in half an hour and the monitor's marks add the rest from real use.
+11. **Deleting clips from the Dataset screen.** Deletion is allowed, with a confirmation that says it changes the held-out set and makes earlier evaluations incomparable, because a bad take (a cough, a door) would otherwise stay in the data for good.
 
 ## 16. Out of scope
 
@@ -273,5 +278,4 @@ Implements the autobot — Wake-Word Training Studio spec (`docs/specs/active/au
 
 ## Open Questions
 
-- **Hard-negative count per session.** The script asks for twenty sound-alikes; the table has over a hundred. Recommended: twenty, `train_excluded` first, because a session should fit in half an hour and the monitor's marks will add the rest from real use.
-- **Deleting clips from the Dataset screen.** Deletion changes the held-out set and makes two evaluations incomparable. Recommended: allow it with a confirmation that says so, because a bad take (a cough, a door) is otherwise in the data for good.
+None at present.

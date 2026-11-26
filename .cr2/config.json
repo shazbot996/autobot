@@ -120,7 +120,7 @@
     "agy": {
       "module": "agy",
       "label": "Antigravity CLI (agy)",
-      "enabled": true,
+      "enabled": false,
       "billing": "enterprise",
       "project": "cbs-altostrat-dev",
       "location": "us-central1",
@@ -217,7 +217,7 @@
     "claude": {
       "module": "claude",
       "label": "Claude CLI",
-      "enabled": false,
+      "enabled": true,
       "maxCostUsd": 25,
       "maxTurns": 40,
       "models": [
@@ -291,7 +291,7 @@
   },
   "agents": {
     "direct": {
-      "model": "agy:gemini-3.8-flash",
+      "model": "claude:claude-sonnet-5-5",
       "effort": "medium",
       "max_tokens": 64000,
       "workspace": "self",
@@ -299,7 +299,7 @@
     },
     "refine": {
       "prompt": "refine",
-      "model": "agy:gemini-3.8-flash",
+      "model": "claude:claude-haiku-5-5",
       "effort": "low",
       "max_tokens": 16000,
       "workspace": "self",
@@ -307,44 +307,44 @@
     },
     "compact": {
       "prompt": "compact",
-      "model": "agy:gemini-3.8-flash",
+      "model": "claude:claude-haiku-5-5",
       "max_tokens": 4000,
       "workspace": "self",
       "mode": "read"
     },
     "create": {
       "prompt": "create",
-      "model": "agy:gemini-3.8-flash",
+      "model": "claude:claude-sonnet-5-5",
       "effort": "medium",
       "max_tokens": 64000
     },
     "revise": {
       "prompt": "revise",
-      "model": "agy:gemini-3.8-flash",
+      "model": "claude:claude-sonnet-5-5",
       "effort": "medium",
       "max_tokens": 64000
     },
     "drift": {
       "prompt": "drift",
-      "model": "agy:gemini-3.8-flash",
+      "model": "claude:claude-sonnet-5-5",
       "effort": "medium",
       "max_tokens": 32000
     },
     "derive": {
       "prompt": "create",
-      "model": "agy:gemini-3.8-flash",
+      "model": "claude:claude-sonnet-5-5",
       "effort": "medium",
       "max_tokens": 64000
     },
     "answer": {
       "prompt": "answer",
-      "model": "agy:gemini-3.8-flash",
+      "model": "claude:claude-sonnet-5-5",
       "effort": "medium",
       "max_tokens": 64000
     },
     "plan": {
       "prompt": "plan",
-      "model": "agy:gemini-3.8-flash",
+      "model": "claude:claude-opus-5-5",
       "effort": "medium",
       "max_tokens": 64000,
       "maxTurns": 100,
@@ -353,7 +353,7 @@
     },
     "apply": {
       "prompt": "apply",
-      "model": "agy:gemini-3.8-flash",
+      "model": "claude:claude-opus-5-5",
       "effort": "high",
       "max_tokens": 64000,
       "workspace": "self",
@@ -364,12 +364,12 @@
     },
     "archive": {
       "prompt": "archive",
-      "model": "agy:gemini-3.8-flash",
+      "model": "claude:claude-opus-5-5",
       "effort": "high",
       "max_tokens": 16000
     },
     "validate": {
-      "model": "agy:gemini-4-argon"
+      "model": "claude:claude-sonnet-5-5"
     },
     "direct:general": {
       "prompt": "direct/general",
@@ -377,7 +377,7 @@
       "max_tokens": 64000,
       "workspace": "self",
       "mode": "build",
-      "model": "agy:gemini-3.8-flash"
+      "model": "claude:claude-sonnet-5-5"
     },
     "direct:ask": {
       "prompt": "direct/ask",
@@ -385,7 +385,7 @@
       "max_tokens": 64000,
       "workspace": "self",
       "mode": "read",
-      "model": "agy:gemini-3.8-flash"
+      "model": "claude:claude-sonnet-5-5"
     },
     "direct:fix": {
       "prompt": "direct/fix",
@@ -393,7 +393,7 @@
       "max_tokens": 64000,
       "workspace": "self",
       "mode": "build",
-      "model": "agy:gemini-4-argon"
+      "model": "claude:claude-opus-5-5"
     },
     "direct:context": {
       "prompt": "direct/context",
@@ -401,7 +401,7 @@
       "max_tokens": 64000,
       "workspace": "self",
       "mode": "build",
-      "model": "agy:gemini-4-argon"
+      "model": "claude:claude-opus-5-5"
     },
     "direct:distill": {
       "prompt": "direct/distill",
@@ -410,10 +410,10 @@
       "workspace": "self",
       "mode": "build",
       "maxTurns": 250,
-      "model": "agy:gemini-4-argon"
+      "model": "claude:claude-opus-5-5"
     },
     "publish": {
-      "model": "agy:gemini-4-argon"
+      "model": "claude:claude-sonnet-5-5"
     }
   },
   "types": {
@@ -656,7 +656,7 @@
       ]
     }
   },
-  "activeProvider": "agy",
+  "activeProvider": "claude",
   "presets": {
     "agy": {
       "direct": "gemini-3.8-flash",

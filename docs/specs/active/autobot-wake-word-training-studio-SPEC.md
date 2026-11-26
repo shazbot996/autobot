@@ -18,6 +18,9 @@ provenance:
   - run: schiele/0029
     at: 2026-11-26T16:51:43.683Z
     mode: revise
+  - run: schiele/0031
+    at: 2026-11-26T16:53:31.362Z
+    mode: revise
 ---
 
 # autobot — Wake-Word Training Studio
@@ -50,7 +53,7 @@ The terminal user interface is now the application, not a control panel beside i
 
 12. **TS-12. The existing screens remain.** The Audio, Wake phrase, Service and Host screens keep what they do today (devices, PipeWire defaults, the level meter, threshold, kind, model path, the systemd unit, naming the NUC), and the training pane keeps showing `make train-wakeword`'s log as it runs. The Audio screen's "save the clip" writes into the voice dataset, not into `tests/fixtures/audio/`; exporting a fixture is the separate, deliberate action of TS-5. Reason: the recording machinery is already built there, and the spec builds on it rather than replacing it; the one change is where a saved clip goes, because a committed fixture must not be a side effect of testing the microphone.
 
-13. **TS-13. It looks like a mid-90s bulletin board, in colour, with themes.** The interface is drawn in the manner of a mid-90s bulletin board system: colourful, fun, with framed panels and menus drawn in `curses` line-drawing characters, on every screen, the existing screens of TS-12 included. Its colours come from a theme, and it ships with several, at least *light*, *dark* and *sun*. Pressing `T` on any screen switches at once to the next theme, except while a text field (such as the speaker's name of TS-3) has focus, where the key types a letter. The chosen theme is written to `config/autobot.toml`, so the interface opens in it next time. Reason: the owner will sit with the studio through long recording sessions and wants it to be fun to look at, and people love being able to change colour themes; `curses` keeps TS-1's standard library only, and keeping the theme in the configuration file keeps TS-10.
+13. **TS-13. It looks like a mid-90s bulletin board, in colour, with themes.** The interface is drawn in the manner of a mid-90s bulletin board system: colourful, fun, with framed panels and menus drawn in `curses` line-drawing characters, on every screen, the existing screens of TS-12 included. Its colours come from a theme, and it ships with three, *light*, *dark* and *sun*. Pressing `T` on any screen switches at once to the next theme, cycling in that order and wrapping from *sun* back to *light*, except while a text field (such as the speaker's name of TS-3) has focus, where the key types a letter. Further themes are added later as small, separate additions, since a theme is only a palette. The chosen theme is written to `config/autobot.toml`, so the interface opens in it next time. Reason: the owner will sit with the studio through long recording sessions and wants it to be fun to look at, and people love being able to change colour themes; `curses` keeps TS-1's standard library only, and keeping the theme in the configuration file keeps TS-10.
 
 14. **TS-14. A no-training baseline kind follows the studio.** Once the studio works, an open-vocabulary keyword spotter, sherpa-onnx's KWS, which needs no training, is added as a third kind beside `text_match` and `openwakeword`, as a separate small step after the studio. It runs locally on the NUC like every other detector, and the evaluation of TS-7 scores it on the same held-out real clips as the trained model. Reason: WW-7 makes a new kind one module, and a baseline on the same microphone and the same real set is what tells whether training is paying off.
 
@@ -82,4 +85,4 @@ The terminal user interface is now the application, not a control panel beside i
 
 ## Open Questions
 
-- **Themes beyond the first three.** TS-13 names *light*, *dark* and *sun*, and the owner wants "various" themes. Which others ship, and in what order does `T` cycle them? Recommended: ship those three first, cycling in that order, and add others as small, separate additions, because they are the only ones named and a theme is just a palette.
+None.

@@ -12,6 +12,10 @@ requires-python = ">=3.12"
 # and speech dependency must run locally: CONSTRAINTS.md CN-1 and CN-2.
 dependencies = [
     "faster-whisper>=1.1",
+    # The agents that reason: Google's Agent Development Kit asks Gemini on
+    # Vertex AI (ADR 0002). It carries text only: no audio leaves the machine
+    # and no speech library is added (CN-1, CN-2).
+    "google-adk>=1.0",
     # The Google Cloud screen: autobot signs in as its service account with
     # google-auth and calls the Google Cloud REST APIs with requests. No
     # Google Cloud client library, and none for speech (CN-1, CN-2).
@@ -69,6 +73,14 @@ ignore_missing_imports = true
 # The Google Cloud screen's two dependencies.
 [[tool.mypy.overrides]]
 module = ["google.*", "requests", "requests.*"]
+ignore_missing_imports = true
+
+# The ADK and the Gemini client it brings. They are imported in one function
+# of `autobot.agents.gemini` and never followed: the code type-checks the
+# same whichever version is installed, and a cold run stays short.
+[[tool.mypy.overrides]]
+module = ["google.adk", "google.adk.*", "google.genai", "google.genai.*"]
+follow_imports = "skip"
 ignore_missing_imports = true
 
 # The `train` extra. It is installed on some machines and not on others, so

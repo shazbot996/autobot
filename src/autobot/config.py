@@ -33,9 +33,24 @@ WAKE_PHRASE_KINDS = (KIND_TEXT_MATCH, KIND_OPENWAKEWORD, KIND_SHERPA_KWS)
 # The colour themes of the terminal user interface, in the order `T` cycles them.
 TUI_THEMES = ("light", "dark", "sun")
 
-# The agents a routing rule can hand a command to. The echo is the first.
+# The agents a routing rule can hand a command to, each defined by one
+# `[[agents]]` table (AG-1). The echo is the first.
 AGENT_ECHO = "echo"
-ROUTE_AGENTS = (AGENT_ECHO,)
+AGENT_QUESTION = "question"
+AGENT_WEATHER = "weather"
+AGENT_TIME = "time"
+AGENT_CAMERA = "camera"
+AGENT_INTRODUCE = "introduce"
+ROUTE_AGENTS = (
+    AGENT_ECHO,
+    AGENT_QUESTION,
+    AGENT_WEATHER,
+    AGENT_TIME,
+    AGENT_CAMERA,
+    AGENT_INTRODUCE,
+)
+# The mode the `forecast` rule hands the weather agent (AG-7).
+MODE_FORECAST = "forecast"
 
 # The Gemini API the `question` agent calls (GC-11): Vertex AI, as the service
 # account, or the Gemini Developer API, with an API key kept as a secret.
@@ -120,10 +135,199 @@ class RouteConfig:
     command: str
     # One of `ROUTE_AGENTS`.
     agent: str
+    # A word the agent receives with the command, as a parameter (AG-7):
+    # `forecast` on a weather rule. Empty when the rule carries none.
+    mode: str = ""
 
 
-# The rules when the file has no `[[routes]]`: "echo" runs the echo.
-DEFAULT_ROUTES = (RouteConfig(command="echo", agent=AGENT_ECHO),)
+# The rules when the file has no `[[routes]]`, in the order of the tree:
+# one per agent, and the aliases `forecast` and `cameras` (AG-7).
+DEFAULT_ROUTES = (
+    RouteConfig(command="question", agent=AGENT_QUESTION),
+    RouteConfig(command="weather", agent=AGENT_WEATHER),
+    RouteConfig(command="forecast", agent=AGENT_WEATHER, mode=MODE_FORECAST),
+    RouteConfig(command="time", agent=AGENT_TIME),
+    RouteConfig(command="camera", agent=AGENT_CAMERA),
+    RouteConfig(command="cameras", agent=AGENT_CAMERA),
+    RouteConfig(command="introduce", agent=AGENT_INTRODUCE),
+    RouteConfig(command="echo", agent=AGENT_ECHO),
+)
+
+# The question each confirmation asks when the definition gives none (AG-13).
+DEFAULT_ENTRY_QUESTION = "Are you sure you want to start this?"
+DEFAULT_REQUEST_QUESTION = (
+    "This may cost a few dollars. Are you sure you want to run this?"
+)
+# The weather agent's API key, as a secret in Secret Manager (GC-9).
+DEFAULT_WEATHER_SECRET = "autobot-weather-api-key"
+
+# The settings an agent owns, beyond the keys every definition has. A key
+# of one agent is refused on another, by name.
+AGENT_SETTINGS: Mapping[str, tuple[str, ...]] = {
+    AGENT_WEATHER: ("zip_code", "daily_limit", "minute_limit", "secret"),
+    AGENT_CAMERA: ("folder", "commands"),
+}
+# The keys of every `[[agents]]` table.
+_AGENT_KEYS = (
+    "name",
+    "description",
+    "prompt",
+    "confirm_entry",
+    "confirm_entry_question",
+    "confirm_request",
+    "confirm_request_question",
+    "listening",
+)
+# A zip code: five digits.
+_ZIP_CODE = re.compile(r"[0-9]{5}")
+# A Secret Manager secret's id.
+_SECRET_ID = re.compile(r"[A-Za-z0-9_-]{1,255}")
+
+
+@dataclass(frozen=True)
+class AgentConfig:
+    """One agent's definition: one `[[agents]]` table (AG-1).
+
+    The definition is data the owner edits; the agent's code is not in it.
+    The settings an agent owns (`AGENT_SETTINGS`) keep their defaults on
+    every other agent, where they mean nothing.
+    """
+
+    # One of `ROUTE_AGENTS`.
+    name: str
+    # What the agent is for, in a sentence or two.
+    description: str = ""
+    # The prompt wrapped around the owner's words, for an agent that calls a
+    # language model; the written script of the `introduce` agent.
+    prompt: str = ""
+    # The confirmation after the command matches, before the agent starts.
+    confirm_entry: bool = False
+    confirm_entry_question: str = DEFAULT_ENTRY_QUESTION
+    # The confirmation before the agent sends a request off the machine.
+    confirm_request: bool = False
+    confirm_request_question: str = DEFAULT_REQUEST_QUESTION
+    # Whether the face listens while the agent's running view is shown (AG-15).
+    listening: bool = True
+    # weather: the location, five digits; empty until the owner sets it.
+    zip_code: str = ""
+    # weather: the agent's own cap on its lookups (GC-10 is the backstop).
+    daily_limit: int = 100
+    minute_limit: int = 10
+    # weather: the Secret Manager secret holding the API key. Only the name is
+    # configuration; the key is never in this file.
+    secret: str = DEFAULT_WEATHER_SECRET
+    # camera: the folder, relative to the repository root, the commands run in.
+    folder: str = "assistant"
+    # camera: the local commands, one a line, started in order.
+    commands: str = ""
+
+
+# The question agent's prompt: it asks for the two parts of AG-4 in the shape
+# the agent's code takes apart.
+QUESTION_PROMPT = """\
+You are autobot, a voice assistant on the owner's computer at home. The owner
+asks you a question out loud, and you answer it in two parts.
+The summary is read aloud: one to three short sentences in plain words, easy
+to hear, with no lists, symbols or markup.
+The detail is shown on a small text screen: a few short lines of plain text,
+at most forty characters each, with the facts the summary leaves out.
+Reply with one JSON object and nothing else, in this shape:
+{"summary": "...", "detail": ["...", "..."]}
+"""
+
+# The introduce agent's script, read aloud as it stands.
+INTRODUCE_SCRIPT = """\
+Hi, I'm autobot, a voice assistant that lives on this computer.
+Say my name, then a command, and I hand it to one of my agents.
+I listen and speak right here, so your voice never leaves the house.
+When you ask me a question, only the words I heard go out to a language model.
+Say cancel at any time to go back a step.
+"""
+
+# The camera agent's commands: the proxy server, then the browser.
+CAMERA_COMMANDS = """\
+make fourway-server
+make fourway
+"""
+
+# The definitions used for any agent the file does not define.
+DEFAULT_AGENTS = (
+    AgentConfig(
+        name=AGENT_ECHO,
+        description="Records five seconds of your voice and plays it back.",
+    ),
+    AgentConfig(
+        name=AGENT_QUESTION,
+        description=(
+            "Asks a language model your question and answers with a spoken "
+            "summary and the details on the screen."
+        ),
+        prompt=QUESTION_PROMPT,
+    ),
+    AgentConfig(
+        name=AGENT_WEATHER,
+        description=(
+            "Says today's weather for your zip code; the forecast command "
+            "gives the days ahead."
+        ),
+    ),
+    AgentConfig(
+        name=AGENT_TIME,
+        description="Says the time from this computer's clock.",
+    ),
+    AgentConfig(
+        name=AGENT_CAMERA,
+        description=(
+            "Opens the camera application, with the four outside cameras, "
+            "in Firefox on the NUC."
+        ),
+        commands=CAMERA_COMMANDS,
+    ),
+    AgentConfig(
+        name=AGENT_INTRODUCE,
+        description="autobot introduces himself and says how he works.",
+        prompt=INTRODUCE_SCRIPT,
+    ),
+)
+
+
+@dataclass(frozen=True)
+class WordsConfig:
+    """The shared word lists of the `[words]` table (AG-13, AG-14).
+
+    A word stands in one list only.
+    """
+
+    # The words that answer a confirmation yes.
+    yes: tuple[str, ...] = (
+        "yes",
+        "yeah",
+        "yep",
+        "yup",
+        "sure",
+        "okay",
+        "ok",
+        "affirmative",
+        "go ahead",
+        "you bet",
+        "you betcha",
+        "do it",
+        "absolutely",
+        "please do",
+    )
+    # The words that answer it no.
+    no: tuple[str, ...] = (
+        "no",
+        "nope",
+        "nah",
+        "no way",
+        "negative",
+        "stop",
+        "don't",
+        "never mind",
+    )
+    # The global action keywords, checked before the rules.
+    actions: tuple[str, ...] = ("cancel",)
 
 
 @dataclass(frozen=True)
@@ -178,8 +382,19 @@ class Config:
     # The routing rules, in the order they are tried.
     routes: tuple[RouteConfig, ...] = DEFAULT_ROUTES
     gcp: GcpConfig = GcpConfig()
+    # The agents' definitions: the file's, in its order, then the default of
+    # every agent it does not define.
+    agents: tuple[AgentConfig, ...] = DEFAULT_AGENTS
+    words: WordsConfig = WordsConfig()
     # The file the configuration was loaded from; None when built from a mapping.
     path: Path | None = None
+
+    def agent(self, name: str) -> AgentConfig:
+        """The definition of the agent `name`; KeyError when there is none."""
+        for definition in self.agents:
+            if definition.name == name:
+                return definition
+        raise KeyError(name)
 
 
 @cache
@@ -230,7 +445,19 @@ def load_config(path: str | Path | None = None) -> Config:
 def parse_config(data: Mapping[str, object], path: Path | None = None) -> Config:
     """Validate parsed TOML and build the `Config`. Messages name the offending key."""
     _reject_unknown(
-        data, "", ("host", "audio", "wake_phrases", "ack", "tui", "routes", "gcp")
+        data,
+        "",
+        (
+            "host",
+            "audio",
+            "wake_phrases",
+            "ack",
+            "tui",
+            "routes",
+            "gcp",
+            "agents",
+            "words",
+        ),
     )
 
     host_table = _table(data, "host", required=False)
@@ -280,6 +507,8 @@ def parse_config(data: Mapping[str, object], path: Path | None = None) -> Config
         tui=TuiConfig(theme=theme),
         routes=_routes(data),
         gcp=_gcp(data),
+        agents=_agents(data),
+        words=_words(data),
         path=path,
     )
 
@@ -420,7 +649,7 @@ def _routes(data: Mapping[str, object]) -> tuple[RouteConfig, ...]:
         where = f"routes #{number}"
         if not isinstance(item, dict):
             raise ConfigError(f"[[routes]] entry #{number} must be a table")
-        _reject_unknown(item, where, ("command", "agent"))
+        _reject_unknown(item, where, ("command", "agent", "mode"))
         agent = _str(item, where, "agent", non_empty=True)
         if agent not in ROUTE_AGENTS:
             raise ConfigError(
@@ -430,6 +659,7 @@ def _routes(data: Mapping[str, object]) -> tuple[RouteConfig, ...]:
             RouteConfig(
                 command=_str(item, where, "command", non_empty=True).strip(),
                 agent=agent,
+                mode=_str(item, where, "mode", default="").strip(),
             )
         )
     commands = [" ".join(entry.command.lower().split()) for entry in entries]
@@ -439,6 +669,121 @@ def _routes(data: Mapping[str, object]) -> tuple[RouteConfig, ...]:
                 f"[[routes]] command {command!r} is configured more than once"
             )
     return tuple(entries)
+
+
+def _agents(data: Mapping[str, object]) -> tuple[AgentConfig, ...]:
+    """The `[[agents]]` entries, then the default of every agent not among them."""
+    raw = data.get("agents", [])
+    if not isinstance(raw, list):
+        raise ConfigError("[[agents]] must be one or more tables")
+    defaults = {definition.name: definition for definition in DEFAULT_AGENTS}
+    owned = {key for keys in AGENT_SETTINGS.values() for key in keys}
+    entries: list[AgentConfig] = []
+    for number, item in enumerate(raw, start=1):
+        where = f"agents #{number}"
+        if not isinstance(item, dict):
+            raise ConfigError(f"[[agents]] entry #{number} must be a table")
+        name = _str(item, where, "name", non_empty=True).strip()
+        if name not in ROUTE_AGENTS:
+            raise ConfigError(
+                f"[{where}] name = {name!r} is not one of: {', '.join(ROUTE_AGENTS)}"
+            )
+        if any(entry.name == name for entry in entries):
+            raise ConfigError(f"[[agents]] agent {name!r} is defined more than once")
+        foreign = sorted(set(item) & owned - set(AGENT_SETTINGS.get(name, ())))
+        if foreign:
+            raise ConfigError(
+                f"[{where}] {foreign[0]} is not a setting of the {name} agent"
+            )
+        _reject_unknown(item, where, (*_AGENT_KEYS, *owned))
+        default = defaults[name]
+        zip_code = _str(item, where, "zip_code", default=default.zip_code).strip()
+        if zip_code and not _ZIP_CODE.fullmatch(zip_code):
+            raise ConfigError(
+                f"[{where}] zip_code = {zip_code!r} is not valid: a zip code is five digits"
+            )
+        secret = _str(item, where, "secret", default=default.secret).strip()
+        if not _SECRET_ID.fullmatch(secret):
+            raise ConfigError(
+                f"[{where}] secret = {secret!r} is not valid: a secret's name is "
+                "letters, digits, hyphens and underscores"
+            )
+        entries.append(
+            AgentConfig(
+                name=name,
+                description=_str(
+                    item, where, "description", default=default.description
+                ).strip(),
+                prompt=_str(item, where, "prompt", default=default.prompt),
+                confirm_entry=_bool(
+                    item, where, "confirm_entry", default=default.confirm_entry
+                ),
+                confirm_entry_question=_str(
+                    item,
+                    where,
+                    "confirm_entry_question",
+                    default=default.confirm_entry_question,
+                    non_empty=True,
+                ).strip(),
+                confirm_request=_bool(
+                    item, where, "confirm_request", default=default.confirm_request
+                ),
+                confirm_request_question=_str(
+                    item,
+                    where,
+                    "confirm_request_question",
+                    default=default.confirm_request_question,
+                    non_empty=True,
+                ).strip(),
+                listening=_bool(item, where, "listening", default=default.listening),
+                zip_code=zip_code,
+                daily_limit=_positive_int(
+                    item, where, "daily_limit", default=default.daily_limit
+                ),
+                minute_limit=_positive_int(
+                    item, where, "minute_limit", default=default.minute_limit
+                ),
+                secret=secret,
+                folder=_str(
+                    item, where, "folder", default=default.folder, non_empty=True
+                ).strip(),
+                commands=_str(item, where, "commands", default=default.commands),
+            )
+        )
+    named = {entry.name for entry in entries}
+    return (
+        *entries,
+        *(definition for definition in DEFAULT_AGENTS if definition.name not in named),
+    )
+
+
+def _words(data: Mapping[str, object]) -> WordsConfig:
+    """The `[words]` table; each list its default when absent."""
+    table = _table(data, "words", required=False)
+    keys = ("yes", "no", "actions")
+    _reject_unknown(table, "words", keys)
+    defaults = WordsConfig()
+    lists: dict[str, tuple[str, ...]] = {}
+    seen: dict[str, str] = {}
+    for key in keys:
+        raw = table.get(key, list(getattr(defaults, key)))
+        if not isinstance(raw, list) or not all(
+            isinstance(word, str) and word.strip() for word in raw
+        ):
+            raise ConfigError(f"[words] {key} must be a list of words")
+        words = tuple(" ".join(str(word).split()) for word in raw)
+        for word in words:
+            folded = word.lower()
+            if seen.get(folded) == key:
+                raise ConfigError(f"[words] {key} lists {word!r} more than once")
+            if folded in seen:
+                raise ConfigError(
+                    f"[words] {word!r} is in both {seen[folded]} and {key}: "
+                    "a word stands in one list only"
+                )
+            seen[folded] = key
+        lists[key] = words
+    return WordsConfig(yes=lists["yes"], no=lists["no"], actions=lists["actions"])
 
 
 def _wake_phrases(data: Mapping[str, object]) -> tuple[WakePhraseConfig, ...]:
@@ -523,6 +868,13 @@ def _str(
         raise ConfigError(f"[{where}] {key} must be a string")
     if non_empty and not value.strip():
         raise ConfigError(f"[{where}] {key} must not be empty")
+    return value
+
+
+def _bool(table: Mapping[str, object], where: str, key: str, *, default: bool) -> bool:
+    value = table.get(key, default)
+    if not isinstance(value, bool):
+        raise ConfigError(f"[{where}] {key} must be true or false")
     return value
 
 

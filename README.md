@@ -7,6 +7,9 @@ provenance:
   - run: schiele/0015
     at: 2026-11-25T22:58:12.732Z
     mode: revise
+  - written: schiele/finish-the-agents-and-the-agent-tree-plan
+    at: 2026-11-27T19:13:08Z
+    mode: revise
 ---
 
 # autobot
@@ -26,7 +29,9 @@ autobot is a personal, always-on voice assistant for one house. A local process 
 
 The studio is built and tested, and has been run on the NUC with scratch data and a virtual audio source. It has not yet been used with a real voice: no session has been recorded and no model has been trained on real recordings. Until one is installed the listener runs on the transcribing `text_match` detector.
 
-Behind the interface is the always-on listener. It listens to the microphone around the clock for any utterance containing the wake phrase ("hey autobot", "yo autobot") and answers aloud, "Yes?", in piper's Joe Medium voice. Nothing after the wake phrase is captured yet, and the rules layer and the agents are not built. Everything runs on the NUC only, on Ubuntu with PipeWire, and needs Python 3.12 or later.
+Press Tab on the main menu to open autobot's face, and Tab or Esc to come back. On the face, say the wake phrase and then a command, and the command goes to an agent. The first commands to try are "time" and "introduce", which need nothing but this machine. "weather" and "forecast" work once the weather agent has a zip code (set it in the **Agent editor**) and its API key is in Secret Manager (the **Google Cloud** screen). "I have a question, ..." sends what follows to the Gemini model chosen on the Google Cloud screen and reads the answer aloud. "camera" opens the outside cameras in Firefox, and "echo" records your voice and plays it back. Say "cancel" at any time to go back a step. A command is heard only through a `text_match` wake phrase, because no other kind transcribes speech.
+
+Behind the interface is the always-on listener. It listens to the microphone around the clock for any utterance containing the wake phrase ("hey autobot", "yo autobot") and answers aloud, "Yes?", in piper's Joe Medium voice. The face routes what is said after the wake phrase to an agent; the rules layer that validates a query first is not built. Everything runs on the NUC only, on Ubuntu with PipeWire, and needs Python 3.12 or later.
 
 From a fresh checkout on the NUC:
 

@@ -7,11 +7,14 @@ import json
 import wave
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
+from agents.agent_fakes import FakeLaunch, FakeLookup, FakeModel
+from autobot.agents.weather_api import Forecast
 from autobot.audio_check import DeviceKind
 from autobot.config import Config
 from autobot.gcp.client import GcpError, GoogleCloud
@@ -125,6 +128,20 @@ Settings
 """
 
 type Key = int | str | Callable[[], None]
+
+# The time the harness's wall clock always says, and its weather.
+WALL_CLOCK = datetime(2026, 11, 27, 15, 42, 7)
+FORECAST = Forecast(
+    place="43215",
+    condition="Partly cloudy",
+    temperature=54,
+    feels_like=51,
+    high=58,
+    low=41,
+    precipitation=20,
+    humidity=60,
+    wind="8 mph NW",
+)
 
 ENTER = 10
 ESC = 27
@@ -411,6 +428,11 @@ class Harness:
     cloud: FakeGoogleCloud | None = None
     # How often the interface connected to Google Cloud.
     connects: list[Path] = field(default_factory=list)
+    # What the agents reach the world through: the local commands started,
+    # the weather lookup and the language model, each a fake.
+    launch: FakeLaunch = field(default_factory=FakeLaunch)
+    lookup: FakeLookup[Forecast] = field(default_factory=lambda: FakeLookup(FORECAST))
+    model: FakeModel = field(default_factory=FakeModel)
 
     def run(self) -> int:
         return self.app.run()
@@ -483,6 +505,9 @@ def make_harness(
     voice = FakeVoice()
 
     connects: list[Path] = []
+    launch = FakeLaunch()
+    lookup = FakeLookup(FORECAST)
+    model = FakeModel()
 
     def connect(config: Config, repo: Path) -> GoogleCloud:
         connects.append(repo)
@@ -516,6 +541,10 @@ def make_harness(
         spawn=lambda function: FunctionTask(function, inline=True),
         voice=voice,
         gcp_connect=connect,
+        launch=launch,
+        wall_clock=lambda: WALL_CLOCK,
+        weather_lookup=lookup,
+        model=lambda config, repo: model,
         git_check_ignore=lambda repo, path: IGNORED if key_ignored else NOT_IGNORED,
     )
     if cloud is not None or connect_error:
@@ -542,4 +571,7 @@ def make_harness(
         voice,
         cloud,
         connects,
+        launch,
+        lookup,
+        model,
     )

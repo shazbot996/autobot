@@ -80,7 +80,9 @@ from autobot.wakeword.script import Prompt
 
 # The main menu's entries, by the digit that chooses them.
 SESSION, TRAIN, CANDIDATE, MONITOR, DATASET = "1", "2", "3", "4", "5"
-AUDIO, WAKE, SERVICE, HOST, FACE = "6", "7", "8", "9", "0"
+AUDIO, WAKE, SERVICE, HOST = "6", "7", "8", "9"
+# Tab opens the face from the main menu (AG-8); the tenth entry is the Agent editor.
+FACE: Key = 9
 
 
 def config(harness: Harness) -> dict[str, object]:
@@ -150,14 +152,83 @@ def test_every_screen_opens_and_the_interface_quits(tmp_path: Path) -> None:
 def test_the_menu_moves_with_the_arrows_and_quit_is_an_entry(tmp_path: Path) -> None:
     harness = make_harness(tmp_path, [UP, ENTER])
     assert harness.run() == 0
-    # Quit is the thirteenth entry, after Google Cloud: it has no number.
+    # Quit is the fourteenth entry, after Google Cloud: it has no number.
     assert harness.screen.saw("►    Quit")
 
 
 def test_zero_chooses_the_tenth_entry(tmp_path: Path) -> None:
-    harness = make_harness(tmp_path, [FACE, -1, F10])
+    harness = make_harness(tmp_path, ["0", -1, F10])
+    assert harness.run() == 0
+    assert harness.screen.saw("═ Agent editor ")
+
+
+def test_tab_opens_the_face_and_tab_returns_to_the_menu(tmp_path: Path) -> None:
+    harness = make_harness(tmp_path, [FACE, -1, FACE, -1, "q"])
+    assert harness.run() == 0
+    screen = harness.screen
+    titles = ["═ Face " in frame for frame in screen.frames]
+    # The face was open, and the last frames are the main menu again.
+    assert any(titles) and not titles[0] and not titles[-1]
+    assert "═ Main Menu " in screen.frames[-1]
+    # Both key bars name Tab.
+    assert screen.saw("Tab Face") and screen.saw("Tab Menu")
+
+
+def test_esc_leaves_the_face_too(tmp_path: Path) -> None:
+    harness = make_harness(tmp_path, [FACE, -1, ESC, -1, "q"])
     assert harness.run() == 0
     assert harness.screen.saw("═ Face ")
+    assert "═ Main Menu " in harness.screen.frames[-1]
+
+
+def test_the_menu_has_an_agent_editor_and_no_face_entry(tmp_path: Path) -> None:
+    harness = make_harness(tmp_path, [-1, "q"])
+    harness.run()
+    frame = harness.screen.frames[0]
+    assert "0  Agent editor" in frame
+    assert not any(
+        row.split()[-1:] == ["Face"] and "Tab" not in row for row in frame.splitlines()
+    )
+    assert "   Face" not in frame.replace("Tab Face", "")
+
+
+def test_tab_in_a_text_field_types_nothing_and_switches_nothing(tmp_path: Path) -> None:
+    # The text field is the Agent routing screen's "Try a sentence..." prompt.
+    keys: list[Key] = [
+        UP,
+        UP,
+        UP,
+        UP,
+        ENTER,
+        "2",
+        FACE,
+        *typed("echo"),
+        ENTER,
+        -1,
+        ESC,
+        "q",
+    ]
+    one_rule = CONFIG_TEXT + '\n[[routes]]\ncommand = "echo"\nagent = "echo"\n'
+    harness = make_harness(tmp_path, keys, config_text=one_rule)
+    assert harness.run() == 0
+    screen = harness.screen
+    assert not screen.saw("═ Face ")
+    assert screen.saw('Tried: "echo"')
+
+
+def test_tab_does_nothing_on_another_screen(tmp_path: Path) -> None:
+    harness = make_harness(tmp_path, [HOST, -1, FACE, -1, ESC, "q"])
+    assert harness.run() == 0
+    assert harness.screen.saw("═ Host ")
+    assert not harness.screen.saw("═ Face ")
+
+
+def test_help_names_tab(tmp_path: Path) -> None:
+    harness = make_harness(tmp_path, [F1, -1, ENTER, "q"], rows=40)
+    harness.run()
+    assert harness.screen.saw(
+        "Tab            switch between the face and the main menu"
+    )
 
 
 def test_f10_quits_from_inside_a_screen_and_closes_the_stream(tmp_path: Path) -> None:
@@ -924,8 +995,9 @@ def test_the_main_menu_lists_the_studio_first(tmp_path: Path) -> None:
         "7  Wake phrase",
         "8  Service",
         "9  Host",
-        "0  Face",
+        "0  Agent editor",
         "   Agent routing",
+        "   Word lists",
         "   Google Cloud",
         "   Quit",
     ]

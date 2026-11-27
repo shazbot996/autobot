@@ -3,7 +3,8 @@
 The wake phrase only wakes autobot. What is said after it is the command,
 and the rules decide which agent receives it (RR-1, RR-3). A rule is one
 `[[routes]]` entry of `config/autobot.toml` (`autobot.config.RouteConfig`):
-a `command`, a word or a few words, and the `agent` it routes to.
+a `command`, a word or a few words, the `agent` it routes to, and an
+optional `mode` the agent receives with it (AG-7).
 
 A rule matches a transcript when its command stands in it, among any other
 words, by the listener's containment rule (WW-6): lower-cased, apostrophes
@@ -24,11 +25,24 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from autobot.config import AGENT_ECHO, RouteConfig
+from autobot.config import (
+    AGENT_CAMERA,
+    AGENT_ECHO,
+    AGENT_INTRODUCE,
+    AGENT_QUESTION,
+    AGENT_TIME,
+    AGENT_WEATHER,
+    RouteConfig,
+)
 
 # What each agent does, in a few words, for the screens.
 AGENT_NOTES = {
     AGENT_ECHO: "records five seconds of your voice and plays it back",
+    AGENT_QUESTION: "asks a language model your question and answers it",
+    AGENT_WEATHER: "says the weather for your zip code, or the days ahead",
+    AGENT_TIME: "says the time from this computer's clock",
+    AGENT_CAMERA: "opens the camera application in Firefox on the NUC",
+    AGENT_INTRODUCE: "says who autobot is and how he works",
 }
 
 _APOSTROPHES = re.compile(r"['’]")
@@ -67,7 +81,8 @@ class Match:
     transcript: str
 
     def describe(self) -> str:
-        return f'rule {self.number}: "{self.route.command}" -> {self.route.agent} agent'
+        text = f'rule {self.number}: "{self.route.command}" -> {self.route.agent} agent'
+        return f"{text} ({self.route.mode})" if self.route.mode else text
 
 
 def match_route(transcript: str, routes: Sequence[RouteConfig]) -> Match | None:

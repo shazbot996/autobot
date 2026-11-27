@@ -14,7 +14,10 @@ Without options it fetches what the listener and the tests need:
 - the acknowledgement's piper voice, Joe Medium (`en_US-joe-medium`, unless
   `[ack] voice` names another), into `models/piper/`,
 - the sherpa-onnx keyword-spotting model of the `sherpa_kws` kind
-  (`models/sherpa-kws/`): a 17 MB archive, of which five files are kept.
+  (`models/sherpa-kws/`): a 17 MB archive, of which five files are kept,
+- the Census Bureau's gazetteer of zip-code centroids, which the weather
+  agent turns a zip code into coordinates with (`models/geo/zcta.tsv`): a
+  1 MB archive, of which three columns of the one table are kept.
 
 The trained wake-word model itself is not fetched: `make train-wakeword`
 builds it.
@@ -46,6 +49,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from autobot.agents.weather_api import (
+    GEO_LATITUDE_COLUMN,
+    GEO_LONGITUDE_COLUMN,
+    GEO_TABLE,
+    GEO_ZIP_COLUMN,
+)
 from autobot.config import AckConfig, ConfigError, load_config, resolve_repo_path
 from autobot.listener.engines.sherpa_kws import (
     SHERPA_KWS_DIR,
@@ -79,6 +88,17 @@ SHERPA_KWS_URL = (
     f"{SHERPA_KWS_MODEL}.tar.bz2"
 )
 SHERPA_KWS_SHA256 = "f170013b4716e41b62b9bfd809687c207cef798ef9bc6534d524e17af9b6561a"
+# The Census Bureau's gazetteer of ZIP Code Tabulation Areas: one row per zip
+# code with the centroid of its area (INTPTLAT, INTPTLONG). A zip archive of
+# one delimited text table. The Bureau publishes no checksum for it and
+# reissues a year's file, so what is checked is the table's shape.
+GEO_URL = (
+    "https://www2.census.gov/geo/docs/maps-data/data/gazetteer/"
+    "2026_Gazetteer/2026_Gaz_zcta_national.zip"
+)
+GEO_COLUMNS = (GEO_ZIP_COLUMN, GEO_LATITUDE_COLUMN, GEO_LONGITUDE_COLUMN)
+# Fewer rows than this is not the national table (it holds about 33,800).
+GEO_MIN_ROWS = 30_000
 
 # The negative-features file: a 128-byte header, then float16 rows of [16, 96].
 ACAV_HEADER_BYTES = 128
@@ -338,6 +358,69 @@ def fetch_sherpa_kws(models: Path) -> bool:
     return True
 
 
+def geo_rows(text: str) -> list[tuple[str, str, str]]:
+    """The (zip code, latitude, longitude) of each row of the gazetteer's table.
+
+    The Bureau has published the table tab-separated and, as in the 2026
+    file, separated by `|` with a column added: the columns are found by
+    their names in the header. `ValueError` when it is not that table.
+    """
+    lines = text.lstrip("\ufeff").splitlines()
+    if not lines:
+        raise ValueError("empty")
+    delimiter = "|" if "|" in lines[0] else "\t"
+    header = [name.strip() for name in lines[0].split(delimiter)]
+    columns = [header.index(name) for name in GEO_COLUMNS]
+    rows = []
+    for line in lines[1:]:
+        cells = [cell.strip() for cell in line.split(delimiter)]
+        if len(cells) <= max(columns):
+            continue
+        code, latitude, longitude = (cells[column] for column in columns)
+        if len(code) == 5 and code.isdigit():
+            rows.append((code, f"{float(latitude):.6f}", f"{float(longitude):.6f}"))
+    return rows
+
+
+def fetch_geo(models: Path) -> bool:
+    """The zip-code centroids: three columns of the gazetteer's table, as a TSV.
+
+    Returns False when the table was there already.
+    """
+    table = models / Path(GEO_TABLE).relative_to(MODELS_DIR)
+    if table.is_file():
+        return False
+    archive = table.with_name(Path(GEO_URL).name)
+    fetch(GEO_URL, archive)
+    try:
+        with zipfile.ZipFile(archive) as bundle:
+            names = [name for name in bundle.namelist() if name.endswith(".txt")]
+            if not names:
+                raise FetchError(f"{archive} does not hold a table")
+            rows = geo_rows(bundle.read(names[0]).decode("utf-8"))
+    except (zipfile.BadZipFile, OSError, EOFError, ValueError) as error:
+        archive.unlink(missing_ok=True)
+        raise FetchError(
+            f"cannot read the zip code table in {GEO_URL} "
+            f"({type(error).__name__}); the download was deleted, run it again"
+        ) from None
+    if len(rows) < GEO_MIN_ROWS:
+        archive.unlink()
+        raise FetchError(
+            f"{GEO_URL} holds {len(rows)} zip codes, not the national table; "
+            "the download was deleted"
+        )
+    writing = table.with_name(table.name + ".tmp")
+    with writing.open("w", encoding="utf-8", newline="") as handle:
+        handle.write("\t".join(GEO_COLUMNS) + "\n")
+        for row in rows:
+            handle.write("\t".join(row) + "\n")
+    writing.replace(table)
+    archive.unlink()
+    say(f"fetched {table} ({len(rows)} zip codes)")
+    return True
+
+
 def ack_voice() -> str:
     """The configured acknowledgement voice; the default when there is no config."""
     try:
@@ -386,6 +469,11 @@ def main(argv: list[str] | None = None) -> int:
         say(
             f"  {'fetched' if new else 'have   '}  {SHERPA_KWS_DIR}/ "
             f"({len(SHERPA_KWS_FILES)} files: the sherpa_kws baseline)"
+        )
+        new = fetch_geo(models)
+        say(
+            f"  {'fetched' if new else 'have   '}  {GEO_TABLE} "
+            "(the zip-code centroids: the weather agent)"
         )
         if args.training:
             fetch_impulse_responses(models)

@@ -259,6 +259,41 @@ def _signal_group(pid: int, signum: int) -> None:
         pass
 
 
+# Where the output of the local commands the agents start goes, under the
+# repository root: runtime state of this machine, never committed.
+AGENTS_LOG = Path("run/agents.log")
+
+
+def launch_detached(argv: Sequence[str], cwd: Path, log: Path) -> str:
+    """Start a local command in `cwd` and do not wait for it; its one-line error, or "".
+
+    The process gets a session of its own, so it outlives the face and the
+    interface, and everything it prints is appended to `log`. This is the
+    one path an agent starts a local command through (the camera agent's
+    two, AG-6): nothing is waited on, stopped or closed here.
+    """
+    if not argv:
+        return "no command to start"
+    if not cwd.is_dir():
+        return f"the folder {cwd} does not exist"
+    try:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("ab") as out:
+            out.write(f"--- {' '.join(argv)} (in {cwd})\n".encode())
+            out.flush()
+            subprocess.Popen(
+                list(argv),
+                cwd=cwd,
+                stdin=subprocess.DEVNULL,
+                stdout=out,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+    except OSError as error:
+        return f"cannot start {argv[0]}: {error.strerror or error}"
+    return ""
+
+
 def module_available(name: str) -> bool:
     """Whether `python -m name` can run: the module exists in this environment."""
     try:

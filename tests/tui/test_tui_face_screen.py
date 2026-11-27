@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 from tui_fakes import (
+    CONFIG_TEXT,
     ENTER,
     ESC,
     F1,
@@ -22,14 +23,25 @@ from autobot.tui.face_ticker import DOWN_TEXT
 from autobot.tui.router import LISTENING, ROUTED
 from autobot.tui.runner import listener_hold_argv
 from autobot.tui.screens.face import FaceScreen
+from autobot.tui.tree_game import Position
 
-FACE = "0"
+# Tab opens the face from the main menu (AG-8).
+FACE = 9
 AT = "2026-11-27T05:40:00.000+00:00"
 PROMPT = 'Say "autobot" to wake me.'
 OFF_NUC = "the face's microphone and voice runs on the NUC only; this host is testbox"
 # One frame of the fake clock, and the microphone audio it brings.
 FRAME = 0.1
 FRAME_SAMPLES = 1600
+# The one rule these tests route by: "echo" runs the echo.
+ECHO_ONLY = (
+    CONFIG_TEXT
+    + """
+[[routes]]
+command = "echo"
+agent = "echo"
+"""
+)
 
 
 def heard(text: str, stretch: int) -> dict[str, Any]:
@@ -103,14 +115,21 @@ def test_face_opens_from_the_main_menu_with_its_layout(
     assert lines[2].lstrip("║ ").startswith("MIC")
     assert "FACE" in lines[2]
     assert lines[2].rstrip("║ ").endswith("listener: down")
-    for title in ("┌─ Summary ", "┌─ autobot ", "┌─ Detail "):
+    for title in ("┌─ Summary ", "┌─ autobot ", "┌─ Map "):
         assert title in frame, title
     # The summary panel is left of the character, and above the detail panel.
     summary = next(index for index, line in enumerate(lines) if "Summary" in line)
     assert "┌─ autobot " in lines[summary]
     assert lines[summary].index("Summary") < lines[summary].index("autobot")
-    detail = next(index for index, line in enumerate(lines) if "Detail" in line)
+    detail = next(index for index, line in enumerate(lines) if "┌─ Map " in line)
     assert detail > summary
+    # Before a wake the map shows the root's box, with the protagonist on it.
+    below = "\n".join(lines[detail:])
+    assert "│ autobot │" in below
+    assert "╭─╮╭─╮" in below
+    box = next(i for i, line in enumerate(lines) if "│ autobot │" in line)
+    eyes = next(i for i, line in enumerate(lines) if "╭─╮╭─╮" in line)
+    assert detail < eyes < box
     assert PROMPT in frame
     # Disconnected, the ticker on the last row inside the frame says so.
     assert DOWN_TEXT in lines[ticker_row(rows)]
@@ -129,7 +148,14 @@ def test_face_opens_from_the_main_menu_with_its_layout(
 
 def test_a_wake_pops_on_the_ticker_and_the_eyes_react(tmp_path: Path) -> None:
     rows = MIN_HEIGHT
-    harness = make_harness(tmp_path, [], theme="dark", rows=rows, cols=MIN_WIDTH)
+    harness = make_harness(
+        tmp_path,
+        [],
+        theme="dark",
+        rows=rows,
+        cols=MIN_WIDTH,
+        config_text=ECHO_ONLY,
+    )
     clock = FakeClock()
     harness.app.services.clock = clock
     screen = harness.screen
@@ -223,32 +249,6 @@ def test_off_the_nuc_the_face_opens_with_its_audio_idle(tmp_path: Path) -> None:
     assert harness.voice.calls == []
 
 
-def test_the_detail_panel_scrolls_with_the_monitors_keys(tmp_path: Path) -> None:
-    harness = make_harness(tmp_path, [], rows=MIN_HEIGHT, cols=MIN_WIDTH)
-
-    def fill() -> None:
-        view = harness.app.views[-1]
-        assert isinstance(view, FaceScreen)
-        for number in range(1, 31):
-            view.model.detail.append(f"detail line {number}")
-
-    harness.screen.keys = [FACE, fill, -1, UP, UP, -1, curses.KEY_END, -1, ESC, "q"]
-    assert harness.run() == 0
-    screen = harness.screen
-    frames = face_frames(harness)
-    assert any("detail line 30" in frame for frame in frames)
-    assert screen.saw("scrolled back 2 lines: End follows")
-    assert "detail line 30" in frames[-1]
-    assert "scrolled back" not in frames[-1]
-
-
-def test_help_names_the_face_screens_keys(tmp_path: Path) -> None:
-    harness = make_harness(tmp_path, [FACE, -1, F1, -1, ENTER, ESC, "q"])
-    assert harness.run() == 0
-    assert harness.screen.saw("Up, Down       scroll the detail panel")
-    assert harness.screen.saw("End            follow the detail panel again")
-
-
 class FakeClock:
     def __init__(self) -> None:
         self.now = 100.0
@@ -257,10 +257,250 @@ class FakeClock:
         return self.now
 
 
+def test_an_agents_view_scrolls_with_the_monitors_keys(tmp_path: Path) -> None:
+    harness = make_harness(tmp_path, [], rows=MIN_HEIGHT, cols=MIN_WIDTH)
+    clock = FakeClock()
+    harness.app.services.clock = clock
+
+    def fill() -> None:
+        view = harness.app.views[-1]
+        assert isinstance(view, FaceScreen)
+        # An agent's running view is shown, as it is while the agent runs.
+        view._level = Position("agents", "time", "running")
+        for number in range(1, 31):
+            view.model.detail.append(f"detail line {number}")
+
+    def later() -> None:
+        clock.now += 1.0
+
+    harness.screen.keys = [
+        FACE,
+        fill,
+        later,
+        -1,
+        UP,
+        UP,
+        -1,
+        curses.KEY_END,
+        -1,
+        ESC,
+        "q",
+    ]
+    assert harness.run() == 0
+    screen = harness.screen
+    frames = face_frames(harness)
+    # The panel is the agent's, titled with its name, and no map is drawn.
+    assert "┌─ time " in frames[-1]
+    assert "┌─ Map " not in frames[-1] and "│ autobot │" not in frames[-1]
+    assert any("detail line 30" in frame for frame in frames)
+    assert screen.saw("scrolled back 2 lines: End follows")
+    assert "detail line 30" in frames[-1]
+    assert "scrolled back" not in frames[-1]
+
+
+def test_the_scroll_keys_do_nothing_on_the_map(tmp_path: Path) -> None:
+    harness = make_harness(tmp_path, [FACE, -1, UP, curses.KEY_PPAGE, -1, ESC, "q"])
+    assert harness.run() == 0
+    view_frames = face_frames(harness)
+    assert all("scrolled back" not in frame for frame in view_frames)
+    assert "┌─ Map " in view_frames[-1]
+
+
+def test_help_names_the_face_screens_keys(tmp_path: Path) -> None:
+    harness = make_harness(tmp_path, [FACE, -1, F1, -1, ENTER, ESC, "q"], rows=40)
+    assert harness.run() == 0
+    assert harness.screen.saw("Up, Down       scroll an agent's view")
+    assert harness.screen.saw("Tab            back to the main menu (also Esc)")
+
+
+# --- the game screen ----------------------------------------------------------
+
+TREE = (
+    CONFIG_TEXT
+    + """
+[[routes]]
+command = "weather"
+agent = "weather"
+
+[[routes]]
+command = "time"
+agent = "time"
+"""
+)
+QUESTION = "Shall I look it up?"
+CONFIRMING = (
+    TREE
+    + f"""
+[[agents]]
+name = "weather"
+confirm_entry = true
+confirm_entry_question = "{QUESTION}"
+"""
+)
+
+
+def map_rows(frame: str) -> list[str]:
+    """The rows of the detail panel of a frame, its title row first."""
+    lines = frame.splitlines()
+    top = next(index for index, line in enumerate(lines) if "┌─ Map " in line)
+    return lines[top:]
+
+
+def green_text(harness: Harness) -> str:
+    """The characters of the detail panel drawn in the theme's green, row by row."""
+    screen = harness.screen
+    ok = harness.app.canvas.theme.ok
+    lines = screen.text().splitlines()
+    top = next(index for index, line in enumerate(lines) if "┌─ Map " in line)
+    return "\n".join(
+        "".join(
+            screen.grid[row][col] if screen.attr_at(row, col) == ok else " "
+            for col in range(screen.cols)
+        ).rstrip()
+        for row in range(top, len(lines) - 2)
+    )
+
+
+@pytest.mark.parametrize(("rows", "cols"), [(MIN_HEIGHT, MIN_WIDTH), (40, 120)])
+def test_the_protagonist_walks_the_tree_as_the_session_moves(
+    tmp_path: Path, rows: int, cols: int
+) -> None:
+    harness = make_harness(
+        tmp_path,
+        [],
+        hostname="nuc",
+        rows=rows,
+        cols=cols,
+        config_text=CONFIRMING,
+        theme="light",
+    )
+    clock = FakeClock()
+    harness.app.services.clock = clock
+    seen: dict[str, str] = {}
+    green: dict[str, str] = {}
+
+    def frame() -> None:
+        clock.now += FRAME
+
+    def look(name: str) -> Key:
+        def note() -> None:
+            seen[name] = harness.screen.text()
+            green[name] = green_text(harness)
+
+        return note
+
+    harness.screen.keys = [
+        FACE,
+        -1,
+        look("idle"),
+        lambda: harness.events.feed(*woke(1)),
+        *[frame] * 8,
+        look("agents"),
+        lambda: harness.events.feed(heard("weather", 2)),
+        *[frame] * 8,
+        look("weather"),
+        ESC,
+        "q",
+    ]
+    assert harness.run() == 0
+    # Before a wake: the root's box, in green, with the protagonist on it.
+    idle = "\n".join(map_rows(seen["idle"]))
+    assert "┌─ Map " in idle and "│ autobot │" in idle and "╭─╮╭─╮" in idle
+    assert "autobot" in green["idle"]
+    assert "say [cancel] to go back" in map_rows(seen["idle"])[0]
+    # After the wake he stands on the agents' level, with the keyword beside it.
+    agents = map_rows(seen["agents"])
+    assert any("╭─╮╭─╮" in line for line in agents)
+    assert "say [cancel] to go back" in agents[0]
+    assert "autobot" not in green["agents"]
+    # After the command the weather box is green, and its question is under it.
+    weather = "\n".join(map_rows(seen["weather"]))
+    assert "weather" in green["weather"]
+    assert "time" not in green["weather"]
+    assert QUESTION in weather
+    assert all(
+        len(row) <= cols
+        for frame in harness.screen.frames
+        for row in frame.splitlines()
+    )
+
+
+def test_while_an_agent_runs_the_panel_is_its_view_and_no_map(tmp_path: Path) -> None:
+    harness = make_harness(
+        tmp_path, [], hostname="nuc", rows=40, cols=120, config_text=TREE
+    )
+    clock = FakeClock()
+    harness.app.services.clock = clock
+
+    def frame() -> None:
+        clock.now += FRAME
+
+    shots: list[str] = []
+    harness.screen.keys = [
+        FACE,
+        -1,
+        lambda: harness.events.feed(*woke(1)),
+        -1,
+        lambda: harness.events.feed(heard("what time is it", 2)),
+        *[frame] * 10,
+        lambda: shots.append(harness.screen.text()),
+        # The answer stays readable after the agent has ended...
+        *[frame] * 100,
+        lambda: shots.append(harness.screen.text()),
+        # ...and then the protagonist is back on the map, at the root.
+        *[frame] * 150,
+        lambda: shots.append(harness.screen.text()),
+        ESC,
+        "q",
+    ]
+    assert harness.run() == 0
+    running, lingering, back = shots
+    for shot in (running, lingering):
+        assert "┌─ time " in shot and "┌─ Map " not in shot
+        assert "│ autobot │" not in shot
+        assert "Friday, November 27, 2026" in shot and "15:42:07" in shot
+    assert "It's 3:42 in the afternoon." in running
+    assert "┌─ Map " in back and "│ autobot │" in back
+    # The time agent started no command and looked nothing up.
+    assert harness.launch.calls == [] and harness.lookup.calls == []
+
+
+def test_a_wake_ends_the_lingering_view_at_once(tmp_path: Path) -> None:
+    harness = make_harness(
+        tmp_path, [], hostname="nuc", rows=40, cols=120, config_text=TREE
+    )
+    clock = FakeClock()
+    harness.app.services.clock = clock
+
+    def frame() -> None:
+        clock.now += FRAME
+
+    shots: list[str] = []
+    harness.screen.keys = [
+        FACE,
+        -1,
+        lambda: harness.events.feed(*woke(1)),
+        -1,
+        lambda: harness.events.feed(heard("time", 2)),
+        *[frame] * 80,
+        lambda: shots.append(harness.screen.text()),
+        lambda: harness.events.feed(*woke(3)),
+        frame,
+        lambda: shots.append(harness.screen.text()),
+        ESC,
+        "q",
+    ]
+    assert harness.run() == 0
+    assert "┌─ time " in shots[0]
+    assert "┌─ Map " in shots[1]
+
+
 def test_on_the_nuc_a_wake_and_echo_run_the_echo_on_the_screen(
     tmp_path: Path,
 ) -> None:
-    harness = make_harness(tmp_path, [], hostname="nuc", rows=40, cols=120)
+    harness = make_harness(
+        tmp_path, [], hostname="nuc", rows=40, cols=120, config_text=ECHO_ONLY
+    )
     clock = FakeClock()
     harness.app.services.clock = clock
     audio = harness.audio

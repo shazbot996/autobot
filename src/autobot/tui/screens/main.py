@@ -11,12 +11,11 @@ from __future__ import annotations
 import textwrap
 from collections.abc import Sequence
 
-from autobot.tui.app import MenuView
+from autobot.tui.app import App, MenuView
 from autobot.tui.menu import MenuItem
 from autobot.tui.screens.audio import AudioScreen
 from autobot.tui.screens.candidate import CandidateScreen
 from autobot.tui.screens.dataset import DatasetScreen, minutes_text
-from autobot.tui.screens.face import FaceScreen
 from autobot.tui.screens.gcp import GcpScreen
 from autobot.tui.screens.host import HostScreen
 from autobot.tui.screens.monitor import open_monitor
@@ -62,6 +61,19 @@ def dataset_line(counts: dict[str, LabelCount]) -> str:
         f"{counts[LABEL_NEGATIVE].clips} negatives, "
         f"{minutes_text(counts[LABEL_AMBIENT].minutes)} min ambient"
     )
+
+
+def open_agent_editor(app: App) -> None:
+    """Open the Agent editor's tree; its module is loaded when it is first opened."""
+    from autobot.tui.screens.agent_editor import AgentTreeScreen
+
+    app.push(AgentTreeScreen(app))
+
+
+def open_word_lists(app: App) -> None:
+    from autobot.tui.screens.agent_words import WordListsScreen
+
+    app.push(WordListsScreen(app))
 
 
 class MainMenu(MenuView):
@@ -157,14 +169,19 @@ class MainMenu(MenuView):
                 "Name this machine as the NUC",
             ),
             MenuItem(
-                "Face",
-                lambda: app.push(FaceScreen(app)),
-                'autobot\'s face: wake it, then say a command such as "echo"',
+                "Agent editor",
+                lambda: open_agent_editor(app),
+                "The agents on their tree: walk it with the arrows, Enter edits one",
             ),
             MenuItem(
                 "Agent routing",
                 lambda: app.push(RoutingScreen(app)),
                 "The rules that hand a command after the wake to an agent",
+            ),
+            MenuItem(
+                "Word lists",
+                lambda: open_word_lists(app),
+                "The yes words, the no words and the global action keywords",
             ),
             MenuItem(
                 "Google Cloud",
@@ -174,6 +191,16 @@ class MainMenu(MenuView):
             ),
             MenuItem("Quit", app.quit, "Leave autobot"),
         ]
+
+    def key_bar(self) -> Sequence[tuple[str, str]]:
+        # Tab opens the face: run mode (AG-8). Esc quits here, as F10 does.
+        return (
+            ("F1", "Help"),
+            (self.app.canvas.glyphs.up_down, "Move"),
+            ("Enter", "Select"),
+            ("Tab", "Face"),
+            ("F10", "Quit"),
+        )
 
     # --- drawing ------------------------------------------------------------
 
@@ -185,8 +212,9 @@ class MainMenu(MenuView):
         self.draw_banner(
             canvas, Rect(rect.y, rect.x + menu_width, rows, rect.width - menu_width)
         )
-        # The panel needs four rows. A terminal of the minimum height has
-        # exactly those under the menu, so the rule above it is left out there.
+        # The panel wants four rows under a rule. A terminal of the minimum
+        # height has three under the menu's fourteen entries: the rule is
+        # left out there, and the panel fits itself to what it is given.
         ruled = rect.height - rows - 1 >= PANEL_ROWS
         if ruled:
             canvas.rule(rect, rows, canvas.theme.frame)
@@ -263,13 +291,18 @@ class MainMenu(MenuView):
         )
         indent = len(label) + len(badge) + 1
         lines: Sequence[str] = self.state_lines(rect.width - 2, indent)
-        # Up to three rows for the sentence; the dataset and training lines follow.
-        shown = lines[: max(1, min(3, rect.height - 2))]
+        # Up to three rows for the sentence; the dataset and training lines
+        # follow. A panel of three rows gives the sentence two of them.
+        room = rect.height - 2 if rect.height >= PANEL_ROWS else rect.height - 1
+        shown = lines[: max(1, min(3, room))]
         for row, line in enumerate(shown):
             start = indent if row == 0 else 0
             text = line[indent:] if row == 0 else line
             canvas.put_in(rect, row, 1 + start, fit(text, rect.width - 2 - start))
-        row = max(2, len(shown))
+        # With four rows or more the dataset line keeps its place on the third
+        # row. With three it follows the sentence, and the training line is
+        # shown when the sentence left it a row.
+        row = max(2, len(shown)) if rect.height >= PANEL_ROWS else len(shown)
         if self.counts is not None:
             canvas.put_in(rect, row, 1, fit(dataset_line(self.counts), rect.width - 2))
         else:

@@ -41,6 +41,7 @@ import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -52,11 +53,13 @@ from autobot.gcp.keyfile import GitCheckIgnore, git_check_ignore
 from autobot.gcp.secrets import clear
 from autobot.tui.audio import FIXTURE_DIR, AudioBackend, Clip, SoundDeviceBackend
 from autobot.tui.config_edit import Change, ConfigEditError, ConfigStore
+from autobot.tui.face import Seams
 from autobot.tui.face_voice import synthesise
 from autobot.tui.menu import Menu, MenuItem
 from autobot.tui.monitor import SOCKET_PATH, EventSource, EventStream
 from autobot.tui.pipewire import PipeWire
 from autobot.tui.runner import (
+    AGENTS_LOG,
     LISTENER_CONTROL_MODULE,
     LISTENER_STATUS_TIMEOUT,
     TRAIN_TARGET,
@@ -66,6 +69,7 @@ from autobot.tui.runner import (
     Runner,
     SubprocessRunner,
     Task,
+    launch_detached,
     listener_status_argv,
     module_available,
     spawn_function,
@@ -85,6 +89,8 @@ from autobot.wakeword.dataset import VOICE_DIR, VoiceDataset
 from autobot.wakeword.script import Prompt, build_script
 
 if TYPE_CHECKING:
+    from autobot.agents.gemini import Model
+    from autobot.agents.weather_api import Lookup
     from autobot.wakeword.evaluate import KindScores, RealScores
 
 # Set these to try the interface against other directories (module docstring).
@@ -98,6 +104,8 @@ MIN_WIDTH = 72
 FRAME_MS = 100
 
 KEY_ESC = 27
+# Tab switches between the main menu and the face (AG-8).
+KEY_TAB = 9
 KEYS_ENTER = (curses.KEY_ENTER, 10, 13)
 KEYS_BACKSPACE = (curses.KEY_BACKSPACE, 127, 8)
 KEY_QUIT = curses.KEY_F10
@@ -122,6 +130,7 @@ HELP_LINES = (
     "Esc            go back one screen, or cancel a dialog",
     "F10            quit (also q on the main menu)",
     "T              the next colour theme: light, dark, sun",
+    "Tab            switch between the face and the main menu",
     "F1             this help",
     "",
     "Every change is written to the config file at once.",
@@ -193,7 +202,42 @@ class Services:
     # Asks git whether it ignores the key file's path; tests give a fake.
     git_check_ignore: GitCheckIgnore = git_check_ignore
 
+    # Starts a local command detached, in a folder, and answers its one-line
+    # error, empty when it started (the camera agent); tests give a fake.
+    launch: Callable[[Sequence[str], Path], str] = field(default=None)  # type: ignore[assignment]
+    # The date and time on this machine (the time agent); tests give a fixed one.
+    wall_clock: Callable[[], datetime] = datetime.now
+    # The weather lookup (the weather agent): Google's Weather API unless
+    # given; tests give a fake that looks nothing up.
+    weather_lookup: Lookup = field(default=None)  # type: ignore[assignment]
+    # Makes the language model behind the question agent for a configuration:
+    # Gemini through the ADK unless given; tests give a fake model.
+    model: Callable[[Config, Path], Model] = field(default=None)  # type: ignore[assignment]
+
+    def seams(self) -> Seams:
+        """What the agents reach the world through, for the face (`face.Seams`)."""
+        return Seams(
+            wall_clock=self.wall_clock,
+            launch=self.launch,
+            connect=self.gcp_connect,
+            weather=self.weather_lookup,
+            model=self.model,
+        )
+
     def __post_init__(self) -> None:
+        if self.launch is None:
+            log = self.repo / AGENTS_LOG
+            self.launch = lambda argv, cwd: launch_detached(argv, cwd, log)
+        if self.weather_lookup is None:
+            from autobot.agents.weather_api import GoogleWeather
+
+            self.weather_lookup = GoogleWeather(
+                self.models_root if self.models_root is not None else self.repo
+            )
+        if self.model is None:
+            from autobot.agents.gemini import AdkModel
+
+            self.model = AdkModel
         if self.dataset is None:
             self.dataset = VoiceDataset(self.repo / VOICE_DIR)
         if self.events is None:
@@ -603,6 +647,8 @@ class App:
             self.quit()
         elif key == KEY_HELP:
             self.message("Help", self.help_lines())
+        elif key == KEY_TAB and not self.typing():
+            self.switch_mode()
         elif view.key(key):
             pass
         elif key == KEY_ESC or key == ord("q"):
@@ -610,6 +656,21 @@ class App:
                 self.pop()
             else:
                 self.quit()
+
+    def switch_mode(self) -> None:
+        """Tab: from the main menu to the face, and from the face back (AG-8).
+
+        The main menu is configuration mode and the face is run mode. On any
+        other screen Tab does nothing: Esc leads back to the menu first.
+        """
+        from autobot.tui.screens.face import FaceScreen
+        from autobot.tui.screens.main import MainMenu
+
+        view = self.views[-1]
+        if isinstance(view, FaceScreen):
+            self.pop()
+        elif isinstance(view, MainMenu):
+            self.push(FaceScreen(self))
 
     def help_lines(self) -> list[str]:
         """What F1 shows: the top screen's own keys, then the general ones."""

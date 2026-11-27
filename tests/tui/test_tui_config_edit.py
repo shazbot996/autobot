@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from tui_fakes import CONFIG_TEXT
 
-from autobot.config import ConfigError, load_config, repo_root
+from autobot.config import Config, ConfigError, load_config, parse_config, repo_root
 from autobot.tui.config_edit import (
     Change,
     ConfigEditError,
@@ -110,16 +110,26 @@ def test_an_invalid_result_is_refused() -> None:
 
 
 def test_a_value_the_editor_cannot_rewrite_is_refused() -> None:
-    text = CONFIG_TEXT.replace('text = "Yes?"', 'text = """Yes?"""')
-    with pytest.raises(ConfigEditError):
+    text = CONFIG_TEXT.replace('text = "Yes?"', "text = '''Yes?'''")
+    with pytest.raises(ConfigEditError, match="edit the config file by hand"):
         apply_changes(text, [Change("ack", "text", "Hello")])
 
 
 def test_an_edit_that_would_disturb_other_data_is_refused() -> None:
-    # A key line hidden inside a multi-line string looks like the real one.
-    text = CONFIG_TEXT.replace('text = "Yes?"', 'text = """\nvoice = "decoy"\n"""')
+    # A line separator inside a comment makes the rest of it look like a key.
+    text = CONFIG_TEXT.replace("[ack]\n", '[ack]\n# note voice = "decoy"\n')
+    assert tomllib.loads(text)["ack"]["voice"] == "en_US-joe-medium"
     with pytest.raises(ConfigEditError, match="refusing to write"):
         apply_changes(text, [Change("ack", "voice", "other")])
+
+
+def test_a_key_line_inside_another_keys_multi_line_string_is_skipped() -> None:
+    text = CONFIG_TEXT.replace(
+        'text = "Yes?"', 'text = """\nvoice = "decoy"\n"""  # the reply'
+    )
+    new = apply_changes(text, [Change("ack", "voice", "other")])
+    assert tomllib.loads(new)["ack"] == {"text": 'voice = "decoy"\n', "voice": "other"}
+    assert new == text.replace('voice = "en_US-joe-medium"', 'voice = "other"')
 
 
 def test_set_value_keeps_crlf_line_endings() -> None:
@@ -212,3 +222,160 @@ def test_the_real_config_file_round_trips() -> None:
     assert data["audio"]["input_device"] == "default"
     assert data["wake_phrases"][0]["threshold"] == 0.7
     assert data["tui"]["theme"] == "sun"
+
+
+# --- agent definitions: multi-line strings, arrays, array entries ------------
+
+AGENTS = """
+[words]
+# The words that answer yes.
+yes = ["yes", "sure"]  # a short list
+no = ["no"]
+
+[[agents]]
+name = "echo"
+
+[[agents]]
+name = "question"
+# The prompt wrapped around the question.
+prompt = "Answer."  # one line for now
+listening = true
+
+[[agents]]
+name = "weather"
+# Off until the owner turns it on.
+confirm_entry = false
+zip_code = ""
+"""
+PROMPT = "You are autobot.\nAnswer in two parts.\nReply with JSON."
+
+
+def agents_text() -> str:
+    return CONFIG_TEXT + AGENTS
+
+
+def config_of(text: str) -> Config:
+    return parse_config(tomllib.loads(text))
+
+
+def test_a_prompt_of_three_lines_is_written_as_a_multi_line_string() -> None:
+    text = agents_text()
+    new = apply_changes(text, [Change("agents", "prompt", PROMPT, 1)])
+    written = (
+        'prompt = """\n'
+        "You are autobot.\n"
+        "Answer in two parts.\n"
+        "Reply with JSON.\\\n"
+        '"""  # one line for now\n'
+    )
+    assert written in new
+    assert tomllib.loads(new)["agents"][1]["prompt"] == PROMPT
+    assert comments(new) == comments(text)
+    assert config_of(new).agent("question").prompt == PROMPT
+
+
+def test_a_value_ending_in_a_newline_closes_on_a_line_of_its_own() -> None:
+    new = apply_changes(agents_text(), [Change("agents", "prompt", PROMPT + "\n", 1)])
+    assert 'Reply with JSON.\n"""  # one line for now\n' in new
+    assert tomllib.loads(new)["agents"][1]["prompt"] == PROMPT + "\n"
+
+
+def test_a_multi_line_value_is_replaced_by_a_one_line_one_and_back() -> None:
+    text = agents_text()
+    multi = apply_changes(text, [Change("agents", "prompt", PROMPT, 1)])
+    one = apply_changes(multi, [Change("agents", "prompt", "Answer.", 1)])
+    assert one == text
+    assert apply_changes(one, [Change("agents", "prompt", PROMPT, 1)]) == multi
+    # A multi-line value is replaced by another as one block.
+    other = apply_changes(multi, [Change("agents", "prompt", "One.\nTwo.", 1)])
+    assert tomllib.loads(other)["agents"][1]["prompt"] == "One.\nTwo."
+    assert "Reply with JSON" not in other
+    assert comments(other) == comments(text)
+
+
+def test_a_multi_line_string_closed_on_its_first_line_is_replaced() -> None:
+    text = CONFIG_TEXT.replace('text = "Yes?"', 'text = """Yes?"""  # the reply')
+    new = apply_changes(text, [Change("ack", "text", "Hello")])
+    assert 'text = "Hello"  # the reply' in new
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        'say """hi""" and "" too\nand """"" five',
+        'ends in quotes\n""',
+        'ends in a quote\n"',
+        "a backslash \\ and \\n\nand a tab\there",
+        "\nstarts with a newline\n\n",
+        "a carriage return\r\nand a bell \x07\n",
+        "ends in a backslash\n\\",
+    ],
+)
+def test_a_multi_line_string_round_trips(value: str) -> None:
+    written = format_value(value)
+    assert written.startswith('"""\n') and written.endswith('"""')
+    assert tomllib.loads(f"v = {written}\n")["v"] == value
+    new = apply_changes(agents_text(), [Change("agents", "prompt", value, 1)])
+    assert tomllib.loads(new)["agents"][1]["prompt"] == value
+
+
+def test_a_list_is_written_as_a_one_line_array() -> None:
+    assert format_value(["yes", "yeah"]) == '["yes", "yeah"]'
+    assert format_value([]) == "[]"
+    assert format_value(['say "hi"', "don't"]) == '["say \\"hi\\"", "don\'t"]'
+    text = agents_text()
+    new = apply_changes(text, [Change("words", "yes", ["yes", "yeah"])])
+    assert 'yes = ["yes", "yeah"]  # a short list\n' in new
+    assert comments(new) == comments(text)
+    assert config_of(new).words.yes == ("yes", "yeah")
+
+
+def test_a_list_is_added_to_a_file_without_its_table() -> None:
+    new = apply_changes(CONFIG_TEXT, [Change("words", "actions", ["cancel", "quit"])])
+    assert new.endswith('[words]\nactions = ["cancel", "quit"]\n')
+    assert config_of(new).words.actions == ("cancel", "quit")
+
+
+def test_a_bool_is_toggled_in_the_third_agents_entry() -> None:
+    text = agents_text()
+    new = apply_changes(text, [Change("agents", "confirm_entry", True, 2)])
+    changed = [
+        (old, now)
+        for old, now in zip(text.splitlines(), new.splitlines(), strict=True)
+        if old != now
+    ]
+    assert changed == [("confirm_entry = false", "confirm_entry = true")]
+    assert config_of(new).agent("weather").confirm_entry
+
+
+def test_a_missing_key_is_added_after_a_multi_line_string() -> None:
+    text = apply_changes(agents_text(), [Change("agents", "prompt", PROMPT, 1)])
+    text = text.replace("listening = true\n", "")
+    new = apply_changes(text, [Change("agents", "listening", False, 1)])
+    assert '"""  # one line for now\nlistening = false\n' in new
+    assert not config_of(new).agent("question").listening
+
+
+def test_a_change_with_a_multi_line_value_is_described_on_one_line() -> None:
+    change = Change("agents", "prompt", "one\ntwo", 1)
+    assert change.describe() == '[agents #2] prompt = "one\\ntwo"'
+
+
+def test_the_real_config_files_agents_and_words_round_trip() -> None:
+    text = (repo_root() / "config" / "autobot.toml").read_text(encoding="utf-8")
+    new = apply_changes(
+        text,
+        [
+            Change("agents", "prompt", PROMPT, 1),
+            Change("agents", "zip_code", "43215", 2),
+            Change("agents", "commands", "make one\nmake two\n", 4),
+            Change("words", "yes", ["yes", "yeah", "roger"]),
+        ],
+    )
+    assert comments(new) == comments(text)
+    config = config_of(new)
+    assert config.agent("question").prompt == PROMPT
+    assert config.agent("weather").zip_code == "43215"
+    assert config.agent("camera").commands == "make one\nmake two\n"
+    assert config.words.yes == ("yes", "yeah", "roger")
+    assert config.agent("introduce") == config_of(text).agent("introduce")

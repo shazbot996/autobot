@@ -58,10 +58,155 @@ target = "ack"
 # stands anywhere in what is said, among other words ("autobot, echo that
 # back" runs the echo). Rules are tried in this order, and the first that
 # matches wins. A command is heard only through a "text_match" wake phrase's
-# transcripts. The agents built: "echo". The Agent routing screen edits these.
+# transcripts. The agents: "echo", "question", "weather", "time", "camera"
+# and "introduce", each defined by an [[agents]] table below. A rule may carry
+# a `mode`, a word the agent receives with the command: two rules to one agent
+# are aliases, and the mode is what differs ("forecast" opens the weather
+# agent on the days ahead). The Agent routing screen edits these.
+[[routes]]
+command = "question"
+agent = "question"
+
+[[routes]]
+command = "weather"
+agent = "weather"
+
+[[routes]]
+command = "forecast"
+agent = "weather"
+mode = "forecast"
+
+[[routes]]
+command = "time"
+agent = "time"
+
+[[routes]]
+command = "camera"
+agent = "camera"
+
+[[routes]]
+command = "cameras"
+agent = "camera"
+
+[[routes]]
+command = "introduce"
+agent = "introduce"
+
 [[routes]]
 command = "echo"
 agent = "echo"
+
+# The shared word lists. Any word of `yes` answers a confirmation yes and any
+# word of `no` answers it no; a word that is in neither counts for nothing.
+# `actions` are the global action keywords, heard at every step of a session
+# before the rules: "cancel" leaves whatever runs and goes back one level of
+# the tree. A word stands in one list only. The Word lists screen edits these.
+[words]
+yes = ["yes", "yeah", "yep", "yup", "sure", "okay", "ok", "affirmative", "go ahead", "you bet", "you betcha", "do it", "absolutely", "please do"]
+no = ["no", "nope", "nah", "no way", "negative", "stop", "don't", "never mind"]
+actions = ["cancel"]
+
+# The agents' definitions, one [[agents]] table each. A definition is data:
+# the agent's code is not in it. Every agent has a `name`, a `description`,
+# a `prompt` (the words wrapped around the owner's for an agent that calls a
+# language model; the introduce agent's written script), two confirmations,
+# each on or off with its question (`confirm_entry` after the command matches,
+# `confirm_request` before a request goes off the machine), and `listening`,
+# whether the face listens, and hears "cancel", while the agent runs. The
+# weather and camera agents also have settings of their own. The Agent editor
+# screen edits these.
+[[agents]]
+name = "echo"
+description = "Records five seconds of your voice and plays it back."
+confirm_entry = false
+confirm_entry_question = "Are you sure you want to start this?"
+confirm_request = false
+confirm_request_question = "This may cost a few dollars. Are you sure you want to run this?"
+listening = true
+
+[[agents]]
+name = "question"
+description = "Asks a language model your question and answers with a spoken summary and the details on the screen."
+# The prompt asks for the two parts of the answer: the summary read aloud and
+# the detail shown on the screen, as one JSON object the agent takes apart.
+prompt = """
+You are autobot, a voice assistant on the owner's computer at home. The owner
+asks you a question out loud, and you answer it in two parts.
+The summary is read aloud: one to three short sentences in plain words, easy
+to hear, with no lists, symbols or markup.
+The detail is shown on a small text screen: a few short lines of plain text,
+at most forty characters each, with the facts the summary leaves out.
+Reply with one JSON object and nothing else, in this shape:
+{"summary": "...", "detail": ["...", "..."]}
+"""
+confirm_entry = false
+confirm_entry_question = "Are you sure you want to start this?"
+confirm_request = false
+confirm_request_question = "This may cost a few dollars. Are you sure you want to run this?"
+listening = true
+
+[[agents]]
+name = "weather"
+description = "Says today's weather for your zip code; the forecast command gives the days ahead."
+confirm_entry = false
+confirm_entry_question = "Are you sure you want to start this?"
+confirm_request = false
+confirm_request_question = "This may cost a few dollars. Are you sure you want to run this?"
+listening = true
+# The location: a five-digit zip code. Empty until it is set; the agent
+# refuses to look anything up without one.
+zip_code = "43214"
+# The agent's own cap on its lookups: the first line; the caps on the Weather
+# API in [[gcp.quotas]] are the backstop (GC-10).
+daily_limit = 100
+minute_limit = 10
+# The Secret Manager secret that holds the Weather API key. Only the name is
+# configuration: the key is never written to this file (GC-9).
+secret = "autobot-weather-api-key"
+
+[[agents]]
+name = "time"
+description = "Says the time from this computer's clock."
+confirm_entry = false
+confirm_entry_question = "Are you sure you want to start this?"
+confirm_request = false
+confirm_request_question = "This may cost a few dollars. Are you sure you want to run this?"
+listening = true
+
+[[agents]]
+name = "camera"
+description = "Opens the camera application, with the four outside cameras, in Firefox on the NUC."
+confirm_entry = true
+confirm_entry_question = "Are you sure you want to start this?"
+confirm_request = false
+confirm_request_question = "This may cost a few dollars. Are you sure you want to run this?"
+listening = true
+# The folder the commands run in, relative to the repository root: the
+# owner's copy of the camera application's project.
+folder = "assistant"
+# The local commands, one a line, started in order without waiting for any to
+# end: the proxy server, then Firefox. NUC only.
+commands = """
+make fourway-server
+make fourway
+"""
+
+[[agents]]
+name = "introduce"
+description = "autobot introduces himself and says how he works."
+# The script, read aloud as it stands, the same every time.
+prompt = """
+Hi, I'm autobot, a voice assistant that lives on this computer.
+Say my name, then a command, and I hand it to one of my agents.
+I listen and speak right here, so your voice never leaves the house.
+When you ask me a question, only the words I heard go out to a language model.
+Say cancel at any time to go back a step.
+"""
+confirm_entry = false
+confirm_entry_question = "Are you sure you want to start this?"
+confirm_request = false
+confirm_request_question = "This may cost a few dollars. Are you sure you want to run this?"
+listening = true
 
 [ack]
 text = "Yes?"

@@ -2,8 +2,8 @@
 
 import pytest
 
-from autobot.config import RouteConfig
-from autobot.routing import commands_text, contains_command, match_route
+from autobot.config import ROUTE_AGENTS, RouteConfig
+from autobot.routing import AGENT_NOTES, commands_text, contains_command, match_route
 
 ECHO = RouteConfig(command="echo", agent="echo")
 LIST = RouteConfig(command="make a list", agent="echo")
@@ -51,6 +51,20 @@ def test_a_match_names_its_rule_and_the_words() -> None:
     assert match.number == 2
     assert match.transcript == "please echo"
     assert match.describe() == 'rule 2: "echo" -> echo agent'
+
+
+def test_a_match_names_the_mode_of_its_rule() -> None:
+    weather = RouteConfig("weather", "weather")
+    forecast = RouteConfig("forecast", "weather", "forecast")
+    match = match_route("what is the forecast", [ECHO, weather, forecast])
+    assert match is not None
+    assert match.route.mode == "forecast"
+    assert match.describe() == 'rule 3: "forecast" -> weather agent (forecast)'
+
+
+def test_every_agent_has_a_note() -> None:
+    assert set(AGENT_NOTES) == set(ROUTE_AGENTS)
+    assert all(AGENT_NOTES.values())
 
 
 def test_no_rule_matching_is_none() -> None:

@@ -284,9 +284,32 @@ def with_routes(*routes: object) -> dict[str, Any]:
     return {**valid_data(), "routes": list(routes)}
 
 
-def test_without_routes_echo_routes_to_the_echo_agent() -> None:
+def test_without_routes_each_agent_has_its_default_rules() -> None:
     config = parse_config(valid_data())
-    assert config.routes == DEFAULT_ROUTES == (RouteConfig("echo", "echo"),)
+    assert config.routes == DEFAULT_ROUTES
+    assert [(route.command, route.agent, route.mode) for route in config.routes] == [
+        ("question", "question", ""),
+        ("weather", "weather", ""),
+        ("forecast", "weather", "forecast"),
+        ("time", "time", ""),
+        ("camera", "camera", ""),
+        ("cameras", "camera", ""),
+        ("introduce", "introduce", ""),
+        ("echo", "echo", ""),
+    ]
+
+
+def test_a_rule_may_carry_a_mode() -> None:
+    config = parse_config(
+        with_routes(
+            {"command": "weather", "agent": "weather"},
+            {"command": "forecast", "agent": "weather", "mode": " forecast "},
+        )
+    )
+    assert config.routes == (
+        RouteConfig("weather", "weather"),
+        RouteConfig("forecast", "weather", "forecast"),
+    )
 
 
 def test_routes_are_read_in_the_order_they_are_tried() -> None:
@@ -302,11 +325,14 @@ def test_routes_are_read_in_the_order_they_are_tried() -> None:
     )
 
 
-def test_the_committed_config_routes_echo_to_the_echo_agent(
+def test_the_committed_config_routes_the_default_rules(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv(CONFIG_ENV_VAR, raising=False)
-    assert load_config().routes == (RouteConfig("echo", "echo"),)
+    routes = load_config().routes
+    assert routes == DEFAULT_ROUTES
+    assert RouteConfig("forecast", "weather", "forecast") in routes
+    assert RouteConfig("echo", "echo") in routes
 
 
 @pytest.mark.parametrize(
@@ -322,7 +348,7 @@ def test_the_committed_config_routes_echo_to_the_echo_agent(
         ),
         (
             with_routes({"command": "list", "agent": "lists"}),
-            r"\[routes #1\] agent = 'lists' is not one of: echo",
+            r"\[routes #1\] agent = 'lists' is not one of: echo, question, weather",
         ),
         (
             with_routes({"command": "echo", "agent": "echo", "word": "x"}),
@@ -334,6 +360,17 @@ def test_the_committed_config_routes_echo_to_the_echo_agent(
                 {"command": "Echo", "agent": "echo"},
             ),
             r"command 'echo' is configured more than once",
+        ),
+        (
+            with_routes(
+                {"command": "weather", "agent": "weather"},
+                {"command": "Weather", "agent": "weather", "mode": "forecast"},
+            ),
+            r"command 'weather' is configured more than once",
+        ),
+        (
+            with_routes({"command": "forecast", "agent": "weather", "mode": 3}),
+            r"\[routes #1\] mode must be a string",
         ),
     ],
 )

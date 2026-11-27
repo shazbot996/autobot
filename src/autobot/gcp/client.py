@@ -86,6 +86,10 @@ class GoogleCloud(Protocol):
         """Store `payload` as a new version of a secret; the version's name."""
         ...
 
+    def secret_value(self, secret: str) -> bytearray:
+        """The value of a secret's latest version, which the caller clears."""
+        ...
+
     def api_keys(self) -> tuple[ApiKey, ...]:
         """The project's API keys, without their values."""
         ...
@@ -330,6 +334,33 @@ class RestGoogleCloud:
         finally:
             body[:] = bytes(len(body))
         return str((data or {}).get("name", ""))
+
+    def secret_value(self, secret: str) -> bytearray:
+        # The response is parsed by the HTTP library, whose copies are its
+        # own. No failure here carries the value: a payload that cannot be
+        # read is named by the secret alone.
+        data = self._call(
+            "GET",
+            "https://secretmanager.googleapis.com/v1/projects/"
+            f"{self._project()}/secrets/{quote(secret, safe='')}"
+            "/versions/latest:access",
+            missing_ok=True,
+        )
+        if data is None:
+            raise GcpError(f"secret {secret} has no enabled version (HTTP 404)")
+        payload = data.get("payload")
+        encoded = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(encoded, str) or not encoded:
+            raise GcpError(f"secret {secret} has no value in its latest version")
+        try:
+            value = bytearray(base64.b64decode(encoded, validate=True))
+        except ValueError:
+            raise GcpError(
+                f"secret {secret} has a latest version that cannot be read"
+            ) from None
+        if not value:
+            raise GcpError(f"secret {secret} has no value in its latest version")
+        return value
 
     def api_keys(self) -> tuple[ApiKey, ...]:
         keys = self._pages(

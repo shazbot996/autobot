@@ -78,6 +78,26 @@ provenance:
   - run: schiele/0115
     at: 2026-11-27T18:06:46.030Z
     mode: revise
+  - written: schiele/finish-the-agents-and-the-agent-tree-plan
+    at: 2026-11-27T19:11:53Z
+    mode: apply
+steps:
+  total: 13
+  completed: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+  status:
+    1: { state: "completed", run: "schiele/0118", at: "2026-11-27T18:17:25.374Z" }
+    2: { state: "completed", run: "schiele/0120", at: "2026-11-27T18:29:16.450Z" }
+    3: { state: "completed", run: "schiele/0122", at: "2026-11-27T18:34:40.616Z" }
+    4: { state: "completed", run: "schiele/0124", at: "2026-11-27T18:38:51.349Z" }
+    5: { state: "completed", run: "schiele/0126", at: "2026-11-27T18:44:03.942Z" }
+    6: { state: "completed", written: "schiele/finish-the-agents-and-the-agent-tree-plan", at: "2026-11-27T19:11:53Z" }
+    7: { state: "completed", written: "schiele/finish-the-agents-and-the-agent-tree-plan", at: "2026-11-27T19:11:54Z" }
+    8: { state: "completed", written: "schiele/finish-the-agents-and-the-agent-tree-plan", at: "2026-11-27T19:11:55Z" }
+    9: { state: "completed", written: "schiele/finish-the-agents-and-the-agent-tree-plan", at: "2026-11-27T19:11:56Z" }
+    10: { state: "completed", written: "schiele/finish-the-agents-and-the-agent-tree-plan", at: "2026-11-27T19:11:57Z" }
+    11: { state: "completed", written: "schiele/finish-the-agents-and-the-agent-tree-plan", at: "2026-11-27T19:11:58Z" }
+    12: { state: "completed", written: "schiele/finish-the-agents-and-the-agent-tree-plan", at: "2026-11-27T19:11:59Z" }
+    13: { state: "completed", written: "schiele/finish-the-agents-and-the-agent-tree-plan", at: "2026-11-27T19:15:04Z" }
 ---
 
 # Agents and the Agent Tree — Implementation Plan

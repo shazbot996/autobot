@@ -7,8 +7,9 @@ from tui_fakes import CONFIG_TEXT, ENTER, ESC, UP, Key, make_harness, typed
 
 from autobot.tui.app import MIN_HEIGHT, MIN_WIDTH
 
-# Up from the first entry wraps to Quit; then Google Cloud, then Agent routing.
-OPEN: list[Key] = [UP, UP, UP, ENTER]
+# Up from the first entry wraps to Quit; then Google Cloud, Word lists and
+# Agent routing.
+OPEN: list[Key] = [UP, UP, UP, UP, ENTER]
 CLEAR = 21  # Ctrl-U empties a prompt's field.
 ROUTES = """
 [[routes]]
@@ -22,7 +23,13 @@ agent = "echo"
 def test_the_screen_lists_the_rules_in_the_order_they_are_tried(
     tmp_path: Path, rows: int, cols: int
 ) -> None:
-    harness = make_harness(tmp_path, [*OPEN, -1, ESC, "q"], rows=rows, cols=cols)
+    harness = make_harness(
+        tmp_path,
+        [*OPEN, -1, ESC, "q"],
+        rows=rows,
+        cols=cols,
+        config_text=CONFIG_TEXT + ROUTES,
+    )
     assert harness.run() == 0
     screen = harness.screen
     for text in (
@@ -39,7 +46,7 @@ def test_the_screen_lists_the_rules_in_the_order_they_are_tried(
         len(row) <= cols for frame in screen.frames for row in frame.splitlines()
     )
     # Nothing was changed, so nothing was written.
-    assert harness.config_text() == CONFIG_TEXT
+    assert harness.config_text() == CONFIG_TEXT + ROUTES
 
 
 def test_a_sentence_is_tried_against_the_rules(tmp_path: Path) -> None:
@@ -57,14 +64,14 @@ def test_a_sentence_is_tried_against_the_rules(tmp_path: Path) -> None:
         ESC,
         "q",
     ]
-    harness = make_harness(tmp_path, keys)
+    harness = make_harness(tmp_path, keys, config_text=CONFIG_TEXT + ROUTES)
     assert harness.run() == 0
     screen = harness.screen
     assert screen.saw('Tried: "could you echo that"')
     assert screen.saw('rule 1: "echo" -> echo agent: runs the agent')
     assert screen.saw('Tried: "what time is it"')
     assert screen.saw("no rule matches: autobot keeps listening")
-    assert harness.config_text() == CONFIG_TEXT
+    assert harness.config_text() == CONFIG_TEXT + ROUTES
 
 
 def test_a_rules_command_is_written_to_the_config_file(tmp_path: Path) -> None:
@@ -100,3 +107,25 @@ def test_without_a_text_match_phrase_the_screen_warns(tmp_path: Path) -> None:
     harness = make_harness(tmp_path, [*OPEN, -1, ESC, "q"], config_text=text)
     assert harness.run() == 0
     assert harness.screen.saw("nowhere: no wake phrase is text_match")
+
+
+def test_a_rule_with_a_mode_shows_it(tmp_path: Path) -> None:
+    modes = """
+[[routes]]
+command = "weather"
+agent = "weather"
+
+[[routes]]
+command = "forecast"
+agent = "weather"
+mode = "forecast"
+"""
+    harness = make_harness(
+        tmp_path, [*OPEN, -1, ESC, "q"], config_text=CONFIG_TEXT + modes
+    )
+    assert harness.run() == 0
+    screen = harness.screen
+    assert screen.saw('1  Rule 1: "weather" -> weather agent')
+    assert screen.saw('2  Rule 2: "forecast" -> weather agent (forecast)')
+    # The agents a rule can name are the six.
+    assert screen.saw("echo, question, weather, time, camera, introduce")

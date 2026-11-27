@@ -24,7 +24,7 @@ from autobot.gcp.client import (
     secret_resource,
 )
 from autobot.gcp.keyfile import NOT_IGNORED
-from gcp.gcp_fakes import git_ignores, write_key
+from gcp.gcp_fakes import FakeGoogleCloud, git_ignores, write_key
 
 ACCOUNT = "autobot-agent@schiele-autobot-dev.iam.gserviceaccount.com"
 SECRET = "autobot-weather-api-key"
@@ -290,6 +290,78 @@ def test_a_secret_version_is_added_and_the_body_is_cleared() -> None:
     assert request["method"] == "POST"
     assert request["url"].endswith(f"/secrets/{SECRET}:addVersion")
     assert json.loads(request["data"]) == {"payload": {"data": "dGhlLXBhc3RlZC1rZXk="}}
+
+
+def test_a_secret_value_is_the_latest_version_decoded() -> None:
+    cloud, session = rest(
+        Response(
+            200,
+            {
+                "name": f"projects/1/secrets/{SECRET}/versions/2",
+                "payload": {"data": "dGhlLXBhc3RlZC1rZXk="},
+            },
+        )
+    )
+    value = cloud.secret_value(SECRET)
+    assert isinstance(value, bytearray)
+    assert value == b"the-pasted-key"
+    request = session.requests[0]
+    assert request["method"] == "GET"
+    assert request["url"] == (
+        "https://secretmanager.googleapis.com/v1/projects/schiele-autobot-dev/"
+        f"secrets/{SECRET}/versions/latest:access"
+    )
+
+
+def test_a_secret_with_no_version_is_one_line_naming_it() -> None:
+    cloud, _ = rest(Response(404, {"error": {"message": "Secret Version\nnot found"}}))
+    with pytest.raises(GcpError) as raised:
+        cloud.secret_value(SECRET)
+    assert str(raised.value) == f"secret {SECRET} has no enabled version (HTTP 404)"
+
+
+def test_a_secret_with_no_readable_value_is_one_line_without_the_payload() -> None:
+    bodies: tuple[dict[str, Any], ...] = (
+        {},
+        {"payload": {}},
+        {"payload": {"data": ""}},
+        {"payload": {"data": "not base64, and never shown"}},
+    )
+    for body in bodies:
+        cloud, _ = rest(Response(200, body))
+        with pytest.raises(GcpError) as raised:
+            cloud.secret_value(SECRET)
+        line = str(raised.value)
+        assert line.startswith(f"secret {SECRET} has ")
+        assert "\n" not in line
+        assert "never shown" not in line
+
+
+def test_a_refused_read_of_a_secret_is_one_line_naming_the_host() -> None:
+    cloud, _ = rest(Response(403, {"error": {"message": "Permission denied"}}))
+    with pytest.raises(GcpError) as raised:
+        cloud.secret_value(SECRET)
+    assert str(raised.value) == (
+        "secretmanager.googleapis.com answered 403: Permission denied"
+    )
+
+
+def test_the_fake_cloud_answers_a_secrets_last_value_and_keeps_what_it_gave() -> None:
+    cloud = FakeGoogleCloud(secrets={SECRET: []})
+    with pytest.raises(GcpError) as raised:
+        cloud.secret_value(SECRET)
+    assert str(raised.value) == f"secret {SECRET} has no enabled version (HTTP 404)"
+    cloud.add_secret_version(SECRET, bytearray(b"first"))
+    cloud.add_secret_version(SECRET, bytearray(b"second"))
+    value = cloud.secret_value(SECRET)
+    assert value == bytearray(b"second")
+    # The caller clears what it was given, and the test can see that it did.
+    value[:] = bytes(len(value))
+    assert cloud.given == [bytearray(6)]
+    # A value a test sets comes before the stored versions.
+    cloud.values[SECRET] = b"preset"
+    assert cloud.secret_value(SECRET) == b"preset"
+    assert cloud.made("secret_value") == [("secret_value", SECRET)] * 3
 
 
 def test_api_keys_carry_their_restriction_and_no_value() -> None:

@@ -37,6 +37,11 @@ class FakeGoogleCloud:
     secrets: dict[str, list[str]] = field(default_factory=dict)
     # What `add_secret_version` was given, by secret.
     stored: dict[str, list[bytes]] = field(default_factory=dict)
+    # A secret's latest value, set by a test; looked up before `stored`.
+    values: dict[str, bytes] = field(default_factory=dict)
+    # Every value `secret_value` handed out, so a test can see the caller
+    # cleared it.
+    given: list[bytearray] = field(default_factory=list)
     keys: list[ApiKey] = field(default_factory=list)
     # The live limit of each (api, quota id).
     quotas: dict[tuple[str, str], int] = field(default_factory=dict)
@@ -81,6 +86,15 @@ class FakeGoogleCloud:
         self.stored.setdefault(secret, []).append(bytes(payload))
         self.secrets[secret].append("ENABLED")
         return f"projects/1234/secrets/{secret}/versions/{len(self.secrets[secret])}"
+
+    def secret_value(self, secret: str) -> bytearray:
+        self._called("secret_value", secret)
+        latest = self.values.get(secret) or b"".join(self.stored.get(secret, [])[-1:])
+        if not latest:
+            raise GcpError(f"secret {secret} has no enabled version (HTTP 404)")
+        value = bytearray(latest)
+        self.given.append(value)
+        return value
 
     def api_keys(self) -> tuple[ApiKey, ...]:
         self._called("api_keys")

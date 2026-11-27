@@ -99,7 +99,8 @@ class RoutingScreen(MenuView):
     def items(self) -> list[MenuItem]:
         items = [
             MenuItem(
-                f'Rule {index + 1}: "{route.command}" -> {route.agent} agent',
+                f'Rule {index + 1}: "{route.command}" -> {route.agent} agent'
+                + (f" ({route.mode})" if route.mode else ""),
                 partial(self.edit_command, index),
                 " ".join(
                     ["The", route.agent, "agent", AGENT_NOTES.get(route.agent, "")]

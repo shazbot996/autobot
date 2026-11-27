@@ -6,6 +6,7 @@ import hashlib
 import io
 import tarfile
 import urllib.error
+import zipfile
 from email.message import Message
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ from typing import Any
 import pytest
 
 from autobot import fetch_models
+from autobot.agents import weather_api
 from autobot.fetch_models import Asset, FetchError
 from autobot.listener.engines.sherpa_kws import SHERPA_KWS_FILES, SHERPA_KWS_MODEL
 
@@ -257,6 +259,95 @@ def test_a_sherpa_kws_archive_without_a_model_file_is_one_line(
         fetch_models.fetch_sherpa_kws(tmp_path / "models")
 
 
+# --- the zip-code centroids: one archive, three columns of its table ------------
+
+# The table as the Bureau publishes it now, and as it did in earlier years.
+GAZETTEER = (
+    "GEOID|GEOIDFQ|ALAND|AWATER|ALAND_SQMI|AWATER_SQMI|INTPTLAT|INTPTLONG\n"
+    "00601|860Z200US00601|166744424|795116|64.38|0.307|18.180621|-66.749931\n"
+    "10001|860Z200US10001|1616221|0|0.624|0.|40.750649|-73.997298\n"
+)
+OLD_GAZETTEER = (
+    "GEOID\tALAND\tAWATER\tALAND_SQMI\tAWATER_SQMI\tINTPTLAT\tINTPTLONG       \n"
+    "10001\t1616221\t0\t0.624\t0.\t40.750649\t-73.997298      \n"
+)
+
+
+def serve_gazetteer(
+    monkeypatch: pytest.MonkeyPatch, body: bytes, min_rows: int = 1
+) -> list[str]:
+    """Make `fetch` write `body` instead of downloading; return the URLs asked for."""
+    asked: list[str] = []
+
+    def fetch(url: str, destination: Path, limit: int | None = None) -> bool:
+        asked.append(url)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(body)
+        return True
+
+    monkeypatch.setattr(fetch_models, "fetch", fetch)
+    monkeypatch.setattr(fetch_models, "GEO_MIN_ROWS", min_rows)
+    return asked
+
+
+def zipped(text: str, name: str = "2026_Gaz_zcta_national.txt") -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as bundle:
+        bundle.writestr(name, text)
+    return buffer.getvalue()
+
+
+def test_the_gazetteer_is_kept_as_the_table_the_weather_agent_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked = serve_gazetteer(monkeypatch, zipped(GAZETTEER))
+    models = tmp_path / "models"
+    assert fetch_models.fetch_geo(models)
+    assert asked == [fetch_models.GEO_URL]
+    assert asked[0].startswith("https://www2.census.gov/geo/docs/maps-data/")
+    # Only the table is kept: no archive, nothing half written.
+    assert [path.name for path in (models / "geo").iterdir()] == ["zcta.tsv"]
+    assert (models / "geo" / "zcta.tsv").read_text() == (
+        "GEOID\tINTPTLAT\tINTPTLONG\n"
+        "00601\t18.180621\t-66.749931\n"
+        "10001\t40.750649\t-73.997298\n"
+    )
+    # It is where, and what, the weather agent's `locate` reads.
+    assert weather_api.locate("10001", tmp_path) == (40.750649, -73.997298)
+    # Already there: nothing is asked for again.
+    assert not fetch_models.fetch_geo(models)
+    assert len(asked) == 1
+
+
+def test_the_gazetteer_is_read_by_its_column_names() -> None:
+    assert fetch_models.geo_rows(OLD_GAZETTEER) == [
+        ("10001", "40.750649", "-73.997298")
+    ]
+    assert fetch_models.geo_rows(GAZETTEER)[0] == ("00601", "18.180621", "-66.749931")
+    with pytest.raises(ValueError):
+        fetch_models.geo_rows("ZIP|LAT|LONG\n10001|40.7|-73.9\n")
+
+
+def test_a_gazetteer_that_is_not_the_table_is_one_line_and_deleted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    models = tmp_path / "models"
+    for body in (b"<html>not an archive</html>", zipped("a page\nof words\n")):
+        serve_gazetteer(monkeypatch, body)
+        with pytest.raises(FetchError, match="cannot read the zip code table") as error:
+            fetch_models.fetch_geo(models)
+        assert "\n" not in str(error.value)
+        assert list((models / "geo").iterdir()) == []
+    serve_gazetteer(monkeypatch, zipped(GAZETTEER, "readme.md"))
+    with pytest.raises(FetchError, match="does not hold a table"):
+        fetch_models.fetch_geo(models)
+    # A table of a few rows is not the national one.
+    serve_gazetteer(monkeypatch, zipped(GAZETTEER), min_rows=30_000)
+    with pytest.raises(FetchError, match="holds 2 zip codes, not the national table"):
+        fetch_models.fetch_geo(models)
+    assert not (models / "geo" / "zcta.tsv").exists()
+
+
 def test_the_command_names_the_listeners_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -271,6 +362,7 @@ def test_the_command_names_the_listeners_files(
 
     monkeypatch.setattr(fetch_models, "fetch", fake_fetch)
     monkeypatch.setattr(fetch_models, "fetch_sherpa_kws", lambda models: False)
+    monkeypatch.setattr(fetch_models, "fetch_geo", lambda models: True)
     monkeypatch.setattr(fetch_models, "ack_voice", lambda: "en_US-joe-medium")
     monkeypatch.setattr(fetch_models, "resolve_repo_path", lambda path: tmp_path)
     assert fetch_models.main([]) == 0
@@ -280,4 +372,8 @@ def test_the_command_names_the_listeners_files(
     assert "  have     models/silero/silero_vad.onnx" in lines
     assert "  have     models/sherpa-kws/ (5 files: the sherpa_kws baseline)" in lines
     assert lines[-1].endswith("(1 fetched now, 8 already there)")
-    assert len(lines) == len(wanted) + 2
+    assert (
+        "  fetched  models/geo/zcta.tsv (the zip-code centroids: the weather agent)"
+        in lines
+    )
+    assert len(lines) == len(wanted) + 3

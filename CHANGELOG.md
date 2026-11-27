@@ -16,6 +16,9 @@ provenance:
   - written: schiele/choose-the-gemini-model-on-the-screen
     at: 2026-11-27T17:06:00Z
     mode: revise
+  - written: schiele/finish-the-agents-and-the-agent-tree-plan
+    at: 2026-11-27T19:13:08Z
+    mode: revise
 ---
 
 # Changelog — autobot
@@ -63,6 +66,21 @@ Unlike the other starter documents, the entry below is not tutorial text to swee
 - The catalogue of roles has one role more than GC-6's table: `roles/cloudquotas.viewer`, read-only, on the project. Reading a quota's live limit by its id goes through the Cloud Quotas API, and none of the six roles of the table holds `cloudquotas.quotas.get`. The spec's table does not list it yet.
 - The Gemini model is a setting, `[gcp] gemini_model`, chosen on the Gemini step of the Google Cloud screen. Enter on **Model** lists the Gemini models Vertex AI offers at that moment, asked as the service account, newest first, and writes the one chosen to the config file; a model the list lacks can be typed. The step reads *missing* when no model is chosen or when the chosen one is no longer offered. A cap on a per-model quota is for the chosen model unless its entry names a `base_model`, so choosing another model moves the cap's check to it. The first model is `gemini-3.5-flash-lite`. The spec has no rule for this yet.
 
+- Agents and the agent tree (2026-11-27), built from `docs/plans/active/agents-and-the-agent-tree-PLAN.md` steps 1 to 13 against `docs/specs/active/autobot-agents-and-the-agent-tree-SPEC.md` (AG-1 to AG-15). An agent is autobot's own code behind a definition, one `[[agents]]` table of `config/autobot.toml`. Six are built: `echo`; `time`, which says the time from this machine's clock; `introduce`, which reads a written script aloud; `camera`, which starts the camera application's two local commands on the NUC without waiting for them, their output going to `run/agents.log`; `weather`, which says today's weather for a zip code, or the days ahead in its `forecast` mode; and `question`, which sends what was said after the command to a Gemini model through Gemini ADK on Vertex AI, as the service account, and answers. It was tested with fakes for the model, the weather lookup, the secret, the local commands and the clock. No real question has been asked of a model and no real weather has been looked up yet.
+- A response has two parts: a summary spoken in the local voice and shown in the summary panel, and a detail laid out to fit the detail panel.
+- The agent tree: the wake phrase at the root, an agent per node, a rule per edge, and a rule may carry a `mode` (`forecast` leads to the weather agent in its forecast mode, `cameras` is a second way to the camera agent).
+- The face's detail panel is a game screen. While no agent runs it shows the tree as a map with a small autobot, with the face's eyes, standing at its centre; the map slides under him as the session moves, the box he is heading for is green, and a confirmation's question is written under its node. While an agent runs, the panel is that agent's view, titled with its name; it stays for twenty seconds after the agent ends, or until the next wake, so an answer can be read.
+- Tab on the main menu opens the face, and Tab or Esc leaves it. The face is no longer a menu entry.
+- The **Agent editor**, the main menu's tenth entry: it walks the tree with the arrow keys and opens an agent's definition, where its description, prompt or script, confirmations, questions, listening setting and own settings are edited and written to the config file at once. The weather agent's API key is pasted into a masked field and stored in Secret Manager; it touches no file. The agent's code is described there and is not edited.
+- The **Word lists** screen: the yes words, the no words and the global action keywords of the new `[words]` table, with Midwest defaults, and a field to try a word against them.
+- Two confirmations an agent's definition can turn on: one after its command is heard and before it starts, and one before it sends a request off the machine. A yes word goes on; a no word, `cancel`, or ten seconds without an answer does not.
+- `cancel`, a global action keyword: said at the agents' level it ends the session, and said while an agent runs it ends the agent and listens for a command again.
+- A `listening` setting per agent: while it is off, nothing said during the agent's view is read, except the answer to a confirmation the agent asks.
+- The weather agent keeps its own count of its calls to the Weather API in `run/weather-calls.json` and refuses a call past its daily or its minute limit; today's weather counts as the two calls it makes. Google's caps are the backstop behind it.
+- `make fetch-models` also fetches the Census Bureau's table of zip-code centroids into `models/geo/zcta.tsv`. The weather agent turns a zip code into coordinates with it, on this machine, so no second API is called.
+- The configuration editor writes a string of several lines as a `"""` string and a list as a one-line array, with the comments around them kept.
+- `google-adk` is a runtime dependency. It carries text only; no speech library was added.
+
 ### Changed
 
 - `wake-word-listener-SPEC.md` gained rules WW-5 to WW-9: `autobot` as the first test wake phrase, detection by containment, a wake phrase's kind as the detector that implements it, the spoken acknowledgement, and running on the NUC only.
@@ -88,6 +106,8 @@ Unlike the other starter documents, the entry below is not tutorial text to swee
 - `[[gcp.quotas]]` in `config/autobot.toml` now holds the Weather API's real quota ids, listed from the project: the API has no quota for the whole API, so each of its seven endpoints is capped at 100 a day and 10 a minute, in fourteen entries. The Vertex AI id is still an unchecked guess.
 - A `[[gcp.quotas]]` entry may name a `base_model`, for a quota that is counted per model, as Vertex AI's Gemini quotas are. The cap command then carries the model as a dimension beside the region, and the live limit compared is that model's. A per-model quota with no model named reads *missing* and says to add one. The Vertex AI entry now holds the real quota id, listed from the project, and no model yet.
 - Gemini on Vertex AI is left without a cap for now, by the owner's decision (2026-11-27): the cap of 10 requests a minute was refused as an increase, because Google's own limit for the chosen model in `us-east5` is already lower. Its `[[gcp.quotas]]` entry is out of `config/autobot.toml`, with a comment saying how to put one back. A billed API with no entry is now a warning on the Rate limits step and no longer makes the step *missing*, which differs from GC-10 as the spec states it.
+- The main menu has fourteen entries: **Agent editor** took the place of **Face** as the tenth, and **Word lists** follows **Agent routing**. Its key bar names Tab. In a terminal of the minimum height the state panel has three rows, so the training line is left out there when the state's sentence takes two.
+- The Agent routing screen shows a rule's mode, and a rule can name any of the six agents.
 
 ### Removed
 

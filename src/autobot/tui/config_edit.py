@@ -18,9 +18,12 @@ Only then is the file replaced, atomically: the text goes to a temporary file
 in the same directory, which is renamed over the original.
 
 The editor handles what the config file uses: `[table]` and `[[array]]`
-headers and one-line scalar values. Anything else (a multi-line string, a
-dotted key) fails verification with a `ConfigEditError` instead of being
-written.
+headers, one-line scalar values, one-line arrays of strings (the word lists)
+and multi-line basic strings (the agents' prompts), which it replaces as a
+block. A multi-line string of another key is skipped whole, so a line inside
+it is never taken for a key. Anything else (a multi-line literal string, a
+dotted key, an array over several lines) fails with a `ConfigEditError`
+instead of being written.
 """
 
 from __future__ import annotations
@@ -38,7 +41,7 @@ from pathlib import Path
 
 from autobot.config import Config, ConfigError, load_config, parse_config
 
-type Scalar = str | int | float | bool
+type Scalar = str | int | float | bool | list[str]
 
 
 class ConfigEditError(Exception):
@@ -60,16 +63,34 @@ class Change:
 
     def describe(self) -> str:
         where = self.table if self.index is None else f"{self.table} #{self.index + 1}"
-        return f"[{where}] {self.key} = {format_value(self.value)}"
+        # A multi-line string is shown on one line, escaped, so a message
+        # stays one line.
+        shown = (
+            json.dumps(self.value, ensure_ascii=False)
+            if isinstance(self.value, str)
+            else format_value(self.value)
+        )
+        return f"[{where}] {self.key} = {shown}"
 
 
 _HEADER = re.compile(r"^\s*(\[\[|\[)\s*([A-Za-z0-9_.-]+)\s*(\]\]|\])\s*(#.*)?$")
-# A one-line scalar: a basic string, a literal string, or a bare token.
-_VALUE = r"""(?:"(?:[^"\\]|\\.)*"|'[^']*'|[^\s#"']+)"""
+# A one-line scalar: a basic string, a literal string, or a bare token; or a
+# one-line array with no `]` inside a string.
+_VALUE = r"""(?:"(?:[^"\\]|\\.)*"|'[^']*'|[^\s#"'\[]+|\[[^\]]*\])"""
+# What may follow a value on its line: spaces and a comment.
+_TRAILING = re.compile(r"\s*(?:#.*)?")
+# Any `key =` at the start of a line, and what follows the `=`.
+_ANY_KEY = re.compile(r"^\s*[A-Za-z0-9_-]+\s*=\s*")
+# The delimiters of a multi-line string: basic, then literal.
+_MULTI_LINE = ('"""', "'''")
 
 
 def format_value(value: Scalar) -> str:
-    """A Python scalar as a TOML value."""
+    """A Python value as a TOML value.
+
+    A list is a one-line array of basic strings, and a string holding a
+    newline a multi-line basic string with its delimiters on lines of their own.
+    """
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, int):
@@ -78,8 +99,82 @@ def format_value(value: Scalar) -> str:
         if not math.isfinite(value):
             raise ConfigEditError(f"cannot write the number {value}")
         return repr(value)
+    if isinstance(value, list):
+        return (
+            "["
+            + ", ".join(json.dumps(item, ensure_ascii=False) for item in value)
+            + "]"
+        )
+    if "\n" in value:
+        return _multi_line(value)
     # A JSON string is a valid TOML basic string.
     return json.dumps(value, ensure_ascii=False)
+
+
+def _multi_line(value: str) -> str:
+    """`value` as a multi-line basic string: three quotes, its lines, three quotes.
+
+    The newline after the opening delimiter is not part of the value. When the
+    value does not end in a newline, its last line ends in a backslash, which
+    joins it to the closing delimiter.
+    """
+    body: list[str] = []
+    quotes = 0
+    for char in value:
+        quotes = quotes + 1 if char == '"' else 0
+        if char == "\\":
+            body.append("\\\\")
+        elif char == '"' and quotes == 3:
+            # Every third quote in a row is escaped, so none closes the string.
+            body.append('\\"')
+            quotes = 0
+        elif char == "\n" or char == "\t":
+            body.append(char)
+        elif ord(char) < 0x20 or ord(char) == 0x7F:
+            body.append(f"\\u{ord(char):04X}")
+        else:
+            body.append(char)
+    text = "".join(body)
+    end = "" if value.endswith("\n") else "\\\n"
+    return f'"""\n{text}{end}"""'
+
+
+def _string_end(text: str, start: int, delimiter: str) -> int | None:
+    """Where the multi-line string whose body begins at `start` ends.
+
+    The index just past its closing delimiter, which takes up to two more
+    quotes of the body before it; None when it is never closed.
+    """
+    index = start
+    while index < len(text):
+        if delimiter == '"""' and text[index] == "\\":
+            index += 2
+            continue
+        if text.startswith(delimiter, index):
+            end = index + 3
+            for _ in range(2):
+                if text.startswith(delimiter[0], end):
+                    end += 1
+            return end
+        index += 1
+    return None
+
+
+def _block_end(
+    lines: Sequence[str], number: int, start: int, delimiter: str
+) -> tuple[int, int] | None:
+    """The line a multi-line string opened on line `number` closes on.
+
+    `start` is the column its body begins at. Returns the closing line's number
+    and the column just past its delimiter; None when it is never closed.
+    """
+    text = "".join(lines[number:])
+    end = _string_end(text, start, delimiter)
+    if end is None:
+        return None
+    last = number + text.count("\n", 0, end)
+    column = end - (text.rfind("\n", 0, end) + 1)
+    return last, column
 
 
 def _table_span(lines: Sequence[str], change: Change) -> tuple[int, int] | None:
@@ -120,27 +215,44 @@ def set_value(text: str, change: Change) -> str:
         return "".join([*lines, *gap, f"[{change.table}]\n", new_line])
 
     start, end = span
-    key_line = re.compile(
-        rf"^(\s*{re.escape(change.key)}\s*=\s*)({_VALUE})(\s*(?:#.*)?)$"
-    )
-    any_key = re.compile(rf"^\s*{re.escape(change.key)}\s*=")
+    key_line = re.compile(rf"^(\s*{re.escape(change.key)}\s*=\s*)")
+    one_line = re.compile(rf"({_VALUE})(\s*(?:#.*)?)$")
     last_content = start - 1
-    for number in range(start, end):
+    number = start
+    while number < end:
         body = lines[number].rstrip("\r\n")
         ending = lines[number][len(body) :]
-        match = key_line.match(body)
-        if match:
-            lines[number] = (
-                match.group(1) + format_value(change.value) + match.group(3) + ending
-            )
-            return "".join(lines)
-        if any_key.match(body):
+        assignment = _ANY_KEY.match(body)
+        opener = body[assignment.end() : assignment.end() + 3] if assignment else ""
+        block = None
+        if opener in _MULTI_LINE and assignment:
+            block = _block_end(lines[:end], number, assignment.end() + 3, opener)
+        key = key_line.match(body)
+        if key:
+            value = format_value(change.value).replace("\n", ending or "\n")
+            rest = body[key.end() :]
+            match = one_line.match(rest)
+            if match:
+                lines[number] = key.group(1) + value + match.group(2) + ending
+                return "".join(lines)
+            if opener == '"""' and block is not None:
+                last, column = block
+                closing = lines[last].rstrip("\r\n")
+                trailing = closing[column:]
+                if _TRAILING.fullmatch(trailing):
+                    tail = lines[last][len(closing) :] or "\n"
+                    lines[number : last + 1] = [key.group(1) + value + trailing + tail]
+                    return "".join(lines)
             raise ConfigEditError(
-                f"[{change.table}] {change.key} is not a one-line value; "
-                "edit the config file by hand"
+                f"[{change.table}] {change.key} is not a value the editor can "
+                "rewrite; edit the config file by hand"
             )
-        if body.strip() and not body.lstrip().startswith("#"):
+        if block is not None:
+            # Skip another key's multi-line string whole.
+            last_content = number = block[0]
+        elif body.strip() and not body.lstrip().startswith("#"):
             last_content = number
+        number += 1
     lines.insert(last_content + 1, new_line)
     return "".join(lines)
 

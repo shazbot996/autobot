@@ -7,10 +7,11 @@ runs five steps, each visible on the face (FS-11):
    already playing. The NUC, the microphone, the output device and autobot's
    voice are checked.
 2. **Speaking.** autobot says `SPEECH_LINE`, shown in the summary as it is
-   spoken (`FaceContext.say`). The line is rendered once per visit to the
-   face, in the background (`prepare`), and the echo waits for the render.
-   The listener is asked to hold its ears for the line's length (FS-12), and
-   the line is played with the mouth following it and the eyes *speaking*.
+   spoken, through the agents' `Speaker` (`autobot.agents.speech`). The
+   line is rendered once per visit to the face, in the background
+   (`prepare`), and the echo waits for the render. The listener is asked to
+   hold its ears for the line's length (FS-12), and the line is played with
+   the mouth following it and the eyes *speaking*.
 3. **Recording.** Five seconds from the microphone, through the face's own
    capture, with the eyes *listening*, the summary counting down and the
    detail panel showing the running length and level.
@@ -36,15 +37,17 @@ from __future__ import annotations
 import math
 from typing import Literal
 
+from autobot.agents import speech
+from autobot.agents.speech import Speaker, held
 from autobot.audio_check import dbfs
 from autobot.tui.audio import Clip
 from autobot.tui.face import FaceContext, FaceError, Voice
 from autobot.tui.face_reactions import ReactionSet
-from autobot.tui.runner import CommandResult, Task
+from autobot.tui.runner import Task
 
 type Stage = Literal["woken", "speaking", "recording", "playing back", "done"]
-# Within the speaking and playing back steps: what the echo waits for.
-type Wait = Literal["render", "hold", "play"]
+# Within the playing back step: what the echo waits for.
+type Wait = Literal["hold", "play"]
 
 # What autobot says before it records (FS-11, the plan's choice of words).
 SPEECH_LINE = "Hey, I'm going to record your voice. Go ahead."
@@ -61,10 +64,10 @@ RECORD_GRACE_SECONDS = 2.0
 NO_AUDIO = "the microphone stopped delivering audio"
 NOTHING_RECORDED = "nothing was recorded"
 MIC_NOT_OPEN = "the microphone is not open"
-# What `control hold` says when there is no listener to hold.
-LISTENER_NOT_RUNNING = "the listener is not running"
 # What the off-NUC refusal names.
 WHAT = "the echo"
+# What `control hold` says when there is no listener to hold: not trouble.
+LISTENER_NOT_RUNNING = speech.LISTENER_NOT_RUNNING
 
 
 def prepare(voice: Voice) -> None:
@@ -77,9 +80,10 @@ class Echo:
 
     def __init__(self) -> None:
         self.stage: Stage = "woken"
-        self._wait: Wait = "render"
+        self._wait: Wait = "hold"
+        self._speaker: Speaker | None = None
         self._hold: Task | None = None
-        # The clip being spoken, then the recording: memory only.
+        # The recording, memory only.
         self._clip: Clip | None = None
         self._recording_since = 0.0
         self._done = False
@@ -122,41 +126,23 @@ class Echo:
             self._trouble(face, str(device_error))
             return
         prepare(face.voice)
-        voice_error = face.voice.error(SPEECH_LINE)
-        if voice_error:
-            self._trouble(face, voice_error)
-            return
         self.stage = "speaking"
-        self._wait = "render"
-        face.say(SPEECH_LINE)
+        self._speaker = Speaker(SPEECH_LINE)
+        self._speaker.start(face)
         self._speaking(face)
 
     def _speaking(self, face: FaceContext) -> None:
-        if self._wait == "render":
-            clip = face.voice.clip(SPEECH_LINE)
-            if clip is None:
-                error = face.voice.error(SPEECH_LINE)
-                if error:
-                    self._trouble(face, error)
-                return
-            if face.speech and face.speech[0] == SPEECH_LINE:
-                face.speech.popleft()
-            self._clip = clip
-            self._hold = face.hold(clip.seconds)
-            self._wait = "hold"
-        if self._wait == "hold":
-            if not self._held(face):
-                return
-            if not self._play(face):
-                return
-            self._wait = "play"
-        if face.playing:
+        speaker = self._speaker
+        assert speaker is not None
+        speaker.tick(face)
+        if speaker.error:
+            self._trouble(face, speaker.error)
             return
-        self._start_recording(face)
+        if speaker.done:
+            self._start_recording(face)
 
     def _start_recording(self, face: FaceContext) -> None:
-        self._clip = None
-        face.release()
+        self._speaker = None
         self.stage = "recording"
         self._recording_since = face.clock()
         face.capture.start_recording(RECORD_SECONDS)
@@ -215,16 +201,13 @@ class Echo:
     def _held(self, face: FaceContext) -> bool:
         """Whether the hold asked for has been answered; a failure is a detail line."""
         assert self._hold is not None
-        result = self._hold.poll()
-        if result is None:
+        if not held(face, self._hold):
             return False
         self._hold = None
-        if not result.ok and not _not_running(result):
-            face.detail.append(f"hold: {result.summary()}")
         return True
 
     def _play(self, face: FaceContext) -> bool:
-        """Play the clip with the eyes *speaking*; False, and trouble, when it cannot."""
+        """Play the recording with the eyes *speaking*; False, and trouble, when it cannot."""
         assert self._clip is not None
         try:
             face.play(self._clip)
@@ -249,9 +232,6 @@ class Echo:
         face.react("trouble")
         face.release()
         self._clip = None
+        self._speaker = None
         self._hold = None
         self._done = True
-
-
-def _not_running(result: CommandResult) -> bool:
-    return result.summary() == LISTENER_NOT_RUNNING

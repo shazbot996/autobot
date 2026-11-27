@@ -15,6 +15,12 @@
   autobot's voice, the microphone's capture, the listener's hold, playback
   and the clock. `say` shows a line in the summary and queues the same
   text to be spoken, so the spoken and the shown summary are one text.
+  `respond` answers in two parts (AG-4): the summary is spoken and shown,
+  and the detail is laid out to fit the detail panel as it was last shown.
+  `confirm` asks a question aloud and listens for a yes or a no (AG-13).
+  `seams` is what an agent reaches the world through: the wall clock, the
+  start of a local command, Google Cloud as the service account, the
+  weather lookup and the language model. Tests give fakes for each.
 - `FaceModel` owns the ticker, the eyes, the meters, the panels and the
   running experience. Every wake goes to the ticker and plays *wake* at
   once. A wake while nothing runs also clears the panels and starts a new
@@ -34,8 +40,9 @@ from __future__ import annotations
 
 import random
 from collections import deque
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
@@ -54,7 +61,14 @@ from autobot.tui.monitor import EVENT_SCORE, EVENT_WAKE, Event
 from autobot.tui.runner import FunctionTask, Runner, Task, listener_hold_argv
 
 if TYPE_CHECKING:
+    from autobot.agents.confirm import Confirmation
+    from autobot.agents.gemini import Model
+    from autobot.agents.response import Response
+    from autobot.agents.speech import Speaker
+    from autobot.agents.weather_api import Lookup
+    from autobot.gcp.client import GoogleCloud
     from autobot.tui.app import Services
+    from autobot.tui.tree_game import Position
 
 # What the summary says before the first wake.
 PROMPT = 'Say "{phrase}" to wake me.'
@@ -65,6 +79,8 @@ DETAIL_LINES = 500
 HOLD_TIMEOUT = 15.0
 # How many transcripts `FaceContext.heard` keeps for the experience.
 HEARD_LINES = 20
+# The detail panel's width before the screen has shown it once.
+DETAIL_COLS = 60
 
 
 class FaceError(Exception):
@@ -130,6 +146,9 @@ class DetailPanel:
         self.lines: deque[str] = deque(maxlen=DETAIL_LINES)
         self.scroll = 0
         self.page = 10
+        # The width the panel was last shown at: a response's detail is laid
+        # out to `page` rows of `cols` columns (AG-4).
+        self.cols = DETAIL_COLS
 
     def append(self, line: str) -> None:
         self.lines.append(line)
@@ -227,8 +246,35 @@ class Voice:
 # --- experiences ---------------------------------------------------------------
 
 
+def _no_launch(argv: Sequence[str], cwd: Path) -> str:
+    return "no local command can be started here"
+
+
+@dataclass
+class Seams:
+    """What an agent reaches the world through, each one faked in the tests.
+
+    `launch` starts a local command detached and answers its one-line error,
+    empty when it started. `connect` is Google Cloud as the service account,
+    or `GcpError`. `weather` is the weather lookup, and `model` makes the
+    language model for a configuration. A seam left None is one the face was
+    not given: the agent that needs it says so in one line.
+    """
+
+    wall_clock: Callable[[], datetime] = datetime.now
+    launch: Callable[[Sequence[str], Path], str] = _no_launch
+    connect: Callable[[Config, Path], GoogleCloud] | None = None
+    weather: Lookup | None = None
+    model: Callable[[Config, Path], Model] | None = None
+
+
 class Experience(Protocol):
-    """One spoken exchange the face runs from a wake to an end (FS-10)."""
+    """One spoken exchange the face runs from a wake to an end (FS-10).
+
+    An experience may also have `cancel()`, called when the owner says a
+    global action keyword while it runs (AG-14): it drops what it holds. The
+    face stops its playback either way.
+    """
 
     @property
     def reactions(self) -> ReactionSet | None:
@@ -262,7 +308,16 @@ class FaceContext:
         eyes: Eyes,
         mic: MicMeter,
         mouth: Mouth,
+        spawn: Callable[[Callable[[], object]], FunctionTask] | None = None,
+        models_root: Path | None = None,
+        seams: Seams | None = None,
     ) -> None:
+        # Starts a slow call without blocking the frame, as `Services.spawn`.
+        self.spawn = spawn if spawn is not None else FunctionTask
+        self.models_root = models_root if models_root is not None else repo
+        self.seams = seams if seams is not None else Seams()
+        # The confirmation an agent is asking right now, if any (AG-13).
+        self._confirmation: Confirmation | None = None
         self.config = config
         self.audio = audio
         self.runner = runner
@@ -295,6 +350,40 @@ class FaceContext:
         self.summary.add(text)
         self.speech.append(text)
         self.voice.prepare(text)
+
+    def respond(self, response: Response) -> Speaker:
+        """Answer in two parts (AG-4): say the summary, lay the detail out.
+
+        The detail replaces what the panel holds, fitted to the panel as it
+        was last shown, not scrolled into. The caller ticks the speaker it
+        is given until it is done.
+        """
+        from autobot.agents.response import layout
+        from autobot.agents.speech import Speaker
+
+        self.detail.clear()
+        for line in layout(response, self.detail.page, self.detail.cols):
+            self.detail.append(line)
+        speaker = Speaker(response.summary)
+        speaker.start(self)
+        return speaker
+
+    def confirm(self, question: str) -> Confirmation:
+        """Ask `question` aloud and listen for a yes or a no (AG-13).
+
+        The agent that asks ticks the confirmation until it is done. While
+        it runs the face listens for its answer, even for an agent whose
+        `listening` is off (AG-15).
+        """
+        from autobot.agents.confirm import Confirmation
+
+        self._confirmation = Confirmation(question, self.config.words)
+        return self._confirmation
+
+    @property
+    def confirming(self) -> bool:
+        """Whether a confirmation an agent asked is still waiting for its answer."""
+        return self._confirmation is not None and not self._confirmation.done
 
     # --- the NUC and the devices ----------------------------------------------
 
@@ -383,6 +472,7 @@ class FaceModel:
         clock: Callable[[], float],
         chance: random.Random | None = None,
         marker: str = DEFAULT_MARKER,
+        seams: Seams | None = None,
     ) -> None:
         self._make = experience
         self.ticker = Ticker(marker)
@@ -401,6 +491,9 @@ class FaceModel:
             eyes=self.eyes,
             mic=self.mic,
             mouth=self.mouth,
+            spawn=spawn,
+            models_root=models_root,
+            seams=seams,
         )
         self.experience: Experience | None = None
         self._pose = self.eyes.pose()
@@ -430,6 +523,7 @@ class FaceModel:
             hostname=services.hostname,
             clock=services.clock,
             marker=marker,
+            seams=services.seams(),
         )
 
     # --- what the experience and the screen read -------------------------------
@@ -455,6 +549,18 @@ class FaceModel:
         """The eyes' pose as of the last `tick`."""
         return self._pose
 
+    @property
+    def position(self) -> Position:
+        """Where the session stands on the agent tree (AG-3).
+
+        It is the running experience's, when it publishes one (the router
+        does); at the root, listening, when the face is idle.
+        """
+        from autobot.tui.tree_game import Position
+
+        position = getattr(self.experience, "position", None)
+        return position if isinstance(position, Position) else Position()
+
     # --- the microphone ----------------------------------------------------------
 
     def open(self) -> bool:
@@ -477,6 +583,7 @@ class FaceModel:
         self.context.reactions = None
         self.context.speech.clear()
         self.context.heard.clear()
+        self.context._confirmation = None
         self.ticker.muted = False
 
     # --- each frame ------------------------------------------------------------------
@@ -538,6 +645,7 @@ class FaceModel:
         face.detail.clear()
         face.speech.clear()
         face.heard.clear()
+        face._confirmation = None
         words = self._waking_words(phrase)
         if words:
             face.heard.append(words)

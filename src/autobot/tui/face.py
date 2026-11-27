@@ -550,11 +550,15 @@ class FaceModel:
 
     def tick(self) -> None:
         """One frame: the ticker moves, the experience runs, the eyes move on."""
-        self.ticker.advance()
+        self.ticker.advance(self.context.clock())
         if self.experience is not None:
             self.experience.tick(self.context)
             self._finish_if_done()
         self._pose = self.eyes.pose()
+
+    def next_frame(self) -> float:
+        """Seconds until the next frame is wanted: when the ticker's next column is due."""
+        return self.ticker.due(self.context.clock())
 
     def _finish_if_done(self) -> None:
         if self.experience is not None and self.experience.done:

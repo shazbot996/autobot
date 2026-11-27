@@ -12,9 +12,14 @@ requires-python = ">=3.12"
 # and speech dependency must run locally: CONSTRAINTS.md CN-1 and CN-2.
 dependencies = [
     "faster-whisper>=1.1",
+    # The Google Cloud screen: autobot signs in as its service account with
+    # google-auth and calls the Google Cloud REST APIs with requests. No
+    # Google Cloud client library, and none for speech (CN-1, CN-2).
+    "google-auth>=2.29",
     "numpy>=1.26",
     "onnxruntime>=1.17",
     "piper-tts>=1.3",
+    "requests>=2.31",
     # The `sherpa_kws` wake-phrase kind: sherpa-onnx runs the keyword spotter,
     # sentencepiece spells the phrase in the model's word pieces. Both local.
     "sentencepiece>=0.2",
@@ -42,6 +47,8 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# So that a test under tests/tui can import the fake Google Cloud of tests/gcp.
+pythonpath = ["tests"]
 addopts = "-ra"
 
 [tool.ruff]
@@ -57,6 +64,11 @@ strict = true
 
 [[tool.mypy.overrides]]
 module = ["faster_whisper", "onnxruntime", "sherpa_onnx", "sounddevice"]
+ignore_missing_imports = true
+
+# The Google Cloud screen's two dependencies.
+[[tool.mypy.overrides]]
+module = ["google.*", "requests", "requests.*"]
 ignore_missing_imports = true
 
 # The `train` extra. It is installed on some machines and not on others, so

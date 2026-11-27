@@ -1,4 +1,4 @@
-"""The application: the full-screen terminal user interface `make deploy` opens.
+"""The application: the full-screen terminal user interface `make launch` opens.
 
 This interface is autobot's application, not a control panel beside one. Its
 first job is the wake-word training studio: collecting the owner's voice on

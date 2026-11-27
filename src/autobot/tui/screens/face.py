@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import curses
 import itertools
+import math
 from collections.abc import Sequence
 
 from autobot.tui.app import App, View
@@ -106,6 +107,11 @@ class FaceScreen(View):
         events = self.app.services.events
         self.model.feed(events.poll(), connected=events.connected)
         self.model.tick()
+
+    def frame_wait(self) -> int:
+        # The next frame is drawn when the ticker's next column is due, so it
+        # scrolls a column at a time at even intervals.
+        return math.ceil(self.model.next_frame() * 1000)
 
     # --- keys -----------------------------------------------------------------
 

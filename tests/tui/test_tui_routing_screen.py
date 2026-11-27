@@ -7,8 +7,8 @@ from tui_fakes import CONFIG_TEXT, ENTER, ESC, UP, Key, make_harness, typed
 
 from autobot.tui.app import MIN_HEIGHT, MIN_WIDTH
 
-# Up from the first entry wraps to Quit; once more is Agent routing.
-OPEN: list[Key] = [UP, UP, ENTER]
+# Up from the first entry wraps to Quit; then Google Cloud, then Agent routing.
+OPEN: list[Key] = [UP, UP, UP, ENTER]
 CLEAR = 21  # Ctrl-U empties a prompt's field.
 ROUTES = """
 [[routes]]

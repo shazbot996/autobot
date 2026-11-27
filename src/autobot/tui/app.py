@@ -46,6 +46,10 @@ from typing import TYPE_CHECKING, Any
 
 from autobot import __version__
 from autobot.config import Config, ConfigError, config_path, repo_root
+from autobot.gcp.client import GoogleCloud
+from autobot.gcp.client import connect as gcp_connect
+from autobot.gcp.keyfile import GitCheckIgnore, git_check_ignore
+from autobot.gcp.secrets import clear
 from autobot.tui.audio import FIXTURE_DIR, AudioBackend, Clip, SoundDeviceBackend
 from autobot.tui.config_edit import Change, ConfigEditError, ConfigStore
 from autobot.tui.face_voice import synthesise
@@ -104,6 +108,8 @@ KEYS_THEME = (ord("t"), ord("T"))
 LISTENER_POLL_SECONDS = 10.0
 
 SPINNER = "|/-\\"
+# What a masked field draws for each character of a secret.
+SECRET_MASK = "*"
 
 # F1 shows the open screen's own keys (`View.help_lines`), then these: the
 # menu keys on a screen that is a menu, and the keys that work everywhere.
@@ -181,6 +187,11 @@ class Services:
     # autobot's voice: renders (text, piper voice, models root) into a clip,
     # locally; tests give a fake that loads no model.
     voice: Callable[[str, str, Path], Clip] = synthesise
+    # Connects to Google Cloud as the service account, or raises `GcpError`
+    # (the Google Cloud screen); tests give a fake Google Cloud.
+    gcp_connect: Callable[[Config, Path], GoogleCloud] = gcp_connect
+    # Asks git whether it ignores the key file's path; tests give a fake.
+    git_check_ignore: GitCheckIgnore = git_check_ignore
 
     def __post_init__(self) -> None:
         if self.dataset is None:
@@ -229,6 +240,10 @@ class View:
     help_lines: Sequence[str] = ()
     # Whether the menu keys (Up, Down, Enter, the numbers) work on the screen.
     menu_keys = False
+    # Whether the view is drawn inside the double-line frame. A view that
+    # shows text to be selected with the mouse sets this False: it is then
+    # given the full width, under the title, with no border beside its rows.
+    framed = True
 
     def __init__(self, app: App) -> None:
         self.app = app
@@ -241,6 +256,14 @@ class View:
 
     def tick(self) -> None:
         """Called every frame while the view is on top."""
+
+    def frame_wait(self) -> int:
+        """How long the next frame waits for a key, in milliseconds.
+
+        A view that animates returns less than `FRAME_MS`, to have its next
+        frame drawn when it is due.
+        """
+        return FRAME_MS
 
     def draw(self, canvas: Canvas, rect: Rect) -> None:
         """Draw inside `rect`, the inside of the frame."""
@@ -625,6 +648,8 @@ class App:
         if self.views:
             self.views[-1].tick()
         self.draw(overlay)
+        wait = self.views[-1].frame_wait() if self.views else FRAME_MS
+        self.screen.timeout(max(1, min(FRAME_MS, wait)))
         try:
             key = int(self.screen.getch())
         except curses.error:
@@ -670,9 +695,15 @@ class App:
 
         view = self.views[-1] if self.views else None
         frame = Rect(1, 0, height - 3, width)
-        canvas.box(frame, view.title if view else "", theme.frame)
-        if view:
-            view.draw(canvas, frame.inset(1, 1))
+        if view is None or view.framed:
+            canvas.box(frame, view.title if view else "", theme.frame)
+            if view:
+                view.draw(canvas, frame.inset(1, 1))
+        else:
+            # The top edge and its title only: nothing stands beside a row.
+            canvas.put(frame.y, 0, canvas.glyphs.horizontal * width, theme.frame)
+            canvas.put(frame.y, 2, f" {view.title[: width - 6]} ", theme.frame)
+            view.draw(canvas, Rect(frame.y + 1, 0, frame.height - 2, width))
 
         message = self.status or (view.hint() if view else "")
         role = self.status_role if self.status else "normal"
@@ -889,6 +920,73 @@ class App:
         finally:
             self._typing -= 1
 
+    def prompt_secret(self, title: str, label: str) -> bytearray | None:
+        """Ask for a secret in a masked field; None when cancelled.
+
+        Every character typed or pasted is drawn as one mask character and
+        kept in a `bytearray`, which the caller clears after use (a `str`
+        cannot be cleared). The value is never drawn. Escape clears the
+        buffer before returning. A paste arrives as keystrokes, so it is
+        masked in the same way and its closing newline is the Enter.
+        """
+        value = bytearray()
+        width = max(len(title) + 4, len(label), 48)
+
+        def overlay(canvas: Canvas) -> None:
+            theme = canvas.theme
+            inside = self._dialog(canvas, title, 5, width)
+            canvas.put_in(inside, 0, 0, fit(label, inside.width), theme.dialog)
+            shown = SECRET_MASK * min(len(value), max(0, inside.width - 1))
+            canvas.put_in(inside, 1, 0, " " * inside.width, theme.field)
+            canvas.put_in(inside, 1, 0, shown, theme.field)
+            canvas.put_in(inside, 1, len(shown), "_", theme.field | curses.A_BLINK)
+            canvas.put_in(
+                inside,
+                2,
+                0,
+                fit(f"{len(value)} characters, not shown", inside.width),
+                theme.dialog,
+            )
+            canvas.put_in(
+                inside,
+                4,
+                0,
+                fit("Enter: Store   Esc: Cancel", inside.width),
+                theme.dialog,
+            )
+
+        # The field has the keyboard: `T` types a letter here.
+        self._typing += 1
+        try:
+            while True:
+                key = self.frame(overlay)
+                if key in (KEY_ESC, KEY_QUIT):
+                    clear(value)
+                    return None
+                if key in KEYS_ENTER:
+                    # A secret is one line. What a longer paste still has
+                    # waiting is dropped, not taken as keys by the screen.
+                    try:
+                        curses.flushinp()
+                    except curses.error:
+                        pass
+                    return value
+                if key in KEYS_BACKSPACE:
+                    if value:
+                        value[-1] = 0
+                        del value[-1]
+                elif key == curses.ascii.NAK:  # Ctrl-U
+                    clear(value)
+                    del value[:]
+                elif 32 <= key < 256 and key != 127:
+                    # Bytes above 127 are a pasted character's UTF-8 bytes.
+                    value.append(key)
+        except BaseException:
+            clear(value)
+            raise
+        finally:
+            self._typing -= 1
+
     def wait(
         self, title: str, task: Task, note: Callable[[], str] | None = None
     ) -> CommandResult:
@@ -1012,7 +1110,7 @@ def _leave_on_signal(signum: int, frame: object) -> None:
 def main() -> int:
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         print(
-            "the terminal user interface needs a terminal: run 'make deploy' in one",
+            "the terminal user interface needs a terminal: run 'make launch' in one",
             file=sys.stderr,
         )
         return 1

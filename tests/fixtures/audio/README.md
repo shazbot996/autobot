@@ -25,7 +25,7 @@ them; piper's synthesis is not deterministic, so running it again gives
 slightly different clips, and the tests must be re-run after it.
 
 Replace them with real recordings, one clip at a time, from the Dataset screen
-of the terminal user interface (`make deploy`). Recordings are made into the
+of the terminal user interface (`make launch`). Recordings are made into the
 voice dataset (`data/voice/`), which is never committed; a fixture is a
 deliberate export of one of them. On the Dataset screen choose a clip, press
 `E`, pick one of the file names above and confirm. The export keeps the file

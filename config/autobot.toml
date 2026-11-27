@@ -1,5 +1,5 @@
 # autobot configuration. This file is the only place configuration lives; the
-# terminal user interface (`make deploy`) is a front for it, not a second store.
+# terminal user interface (`make launch`) is a front for it, not a second store.
 # Loaded and validated by src/autobot/config.py. Set AUTOBOT_CONFIG to load a
 # different file.
 
@@ -42,7 +42,7 @@ phrase = "autobot"
 kind = "text_match"
 # Path of the model file, relative to the repository root. Required for
 # "openwakeword", unused by "text_match" and "sherpa_kws". The studio
-# (`make deploy`) installs the trained model: it writes kind, model and
+# (`make launch`) installs the trained model: it writes kind, model and
 # threshold here when the owner confirms a candidate, with the model's
 # evaluation beside it (autobot.json).
 model = ""
@@ -72,3 +72,125 @@ voice = "en_US-joe-medium"
 # The colour theme of the terminal user interface: "light", "dark" or "sun".
 # Pressing T in the interface switches to the next one and writes it here.
 theme = "sun"
+
+# Google Cloud. autobot and its agents use Google Cloud only as their own
+# service account, never as the owner (GC-4). The Google Cloud screen
+# (`make launch`) checks each step of the setup and shows the gcloud commands
+# that fix what is missing; the owner runs them himself, and autobot never
+# does. The screen writes `project` and `region`; the rest is edited here.
+[gcp]
+# The Google Cloud project, in the organization cambiumplatform.com.
+project = "schiele-autobot-dev"
+# The region Vertex AI is called in, and regional quotas are compared in.
+region = "us-east5"
+# The dedicated service account. It gets the narrowest roles that cover what
+# autobot does, and never a role that could configure the project (GC-6).
+service_account = "autobot-agent@schiele-autobot-dev.iam.gserviceaccount.com"
+# The service account's key, relative to the repository root. Only this path
+# is configuration. The file is a credential: it is created by the script the
+# Key step shows, it is git-ignored (`secrets/`), and nothing reads it but
+# Google's own sign-in code (GC-7).
+credentials_file = "secrets/service-account-autobot-agent.json"
+# The Gemini API the question agent calls: "aiplatform.googleapis.com"
+# (Vertex AI, as the service account) or "generativelanguage.googleapis.com"
+# (the Gemini Developer API, with an API key kept as a secret) (GC-11).
+gemini_api = "aiplatform.googleapis.com"
+# The Gemini model the question agent calls. The Gemini step lists the
+# models the API offers now and writes the one chosen here. A cap on a quota
+# that is counted per model is for this model.
+gemini_model = "gemini-3.5-flash-lite"
+# The Cloud Storage buckets autobot is meant to use. None yet (GC-12).
+buckets = []
+
+# The intended cap on each billed API (GC-10). `metric` is the quota id that
+#   gcloud beta quotas info list --service=<api> --project=<project>
+# prints; the cap's period (a day, a minute) is part of the id. `limit` is the
+# most the live quota may be. An id that does not exist shows as missing on
+# the Rate limits step, with that command beside it.
+#
+# The Weather API has no quota for the API as a whole: each of its seven
+# endpoints has its own per-day and per-minute quota (listed from the project
+# on 2026-11-27). Every endpoint is capped, the ones no agent calls too, so
+# that a leaked key is capped whatever it asks for: 100 a day and 10 a minute
+# each.
+[[gcp.quotas]]
+api = "weather.googleapis.com"
+metric = "CurrentConditionsQueriesPerDay"
+limit = 100
+
+[[gcp.quotas]]
+api = "weather.googleapis.com"
+metric = "CurrentConditionsQueriesPerMinute"
+limit = 10
+
+[[gcp.quotas]]
+api = "weather.googleapis.com"
+metric = "ForecastDaysQueriesPerDay"
+limit = 100
+
+[[gcp.quotas]]
+api = "weather.googleapis.com"
+metric = "ForecastDaysQueriesPerMinute"
+limit = 10
+
+[[gcp.quotas]]
+api = "weather.googleapis.com"
+metric = "ForecastHoursQueriesPerDay"
+limit = 100
+
+[[gcp.quotas]]
+api = "weather.googleapis.com"
+metric = "ForecastHoursQueriesPerMinute"
+limit = 10
+
+[[gcp.quotas]]
+api = "weather.googleapis.com"
+metric = "ForecastMinutesQueriesPerDay"
+limit = 100
+
+[[gcp.quotas]]
+api = "weather.googleapis.com"
+metric = "ForecastMinutesQueriesPerMinute"
+limit = 10
+
+[[gcp.quotas]]
+api = "weather.googleapis.com"
+metric = "HistoryHoursQueriesPerDay"
+limit = 100
+
+[[gcp.quotas]]
+api = "weather.googleapis.com"
+metric = "HistoryHoursQueriesPerMinute"
+limit = 10
+
+[[gcp.quotas]]
+api = "weather.googleapis.com"
+metric = "MapTileQueriesPerDay"
+limit = 100
+
+[[gcp.quotas]]
+api = "weather.googleapis.com"
+metric = "MapTileQueriesPerMinute"
+limit = 10
+
+[[gcp.quotas]]
+api = "weather.googleapis.com"
+metric = "PublicAlertsQueriesPerDay"
+limit = 100
+
+[[gcp.quotas]]
+api = "weather.googleapis.com"
+metric = "PublicAlertsQueriesPerMinute"
+limit = 10
+
+# Gemini on Vertex AI has no cap here for now (the owner's decision,
+# 2026-11-27). Its request quota is counted per model and per region, and
+# Google's own limit for the chosen model in us-east5 is already below the 10
+# a minute that was intended: asking for 10 was refused as an increase. The
+# Rate limits step notes that the API is billed and uncapped. To cap it later,
+# add an entry such as:
+#   [[gcp.quotas]]
+#   api = "aiplatform.googleapis.com"
+#   metric = "GenerateContentRequestsPerMinutePerProjectPerRegionPerBaseModel"
+#   limit = 10
+# It is for the model in `gemini_model` unless it names its own `base_model`.

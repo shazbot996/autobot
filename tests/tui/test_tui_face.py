@@ -267,8 +267,7 @@ def test_two_wakes_a_second_apart_start_one_experience(tmp_path: Path) -> None:
     assert rig.made[0].started_at == 100.0
     assert rig.made[0].ticks == 20
     # Both wakes popped on the ticker, once the second has scrolled in.
-    for _ in range(15):
-        rig.model.ticker.advance()
+    rig.frames(1.5)
     cells = rig.model.ticker.view(WIDTH)
     text = "".join(cell.char for cell in cells)
     assert "hey autobot" in text

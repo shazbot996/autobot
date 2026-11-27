@@ -42,7 +42,7 @@ Stages, each cached under `models/wakeword/work/<phrase>/`:
 6. **export**: the ONNX file and a `.json` of the metrics are written as a
    *candidate* (`models/wakeword/candidate.onnx` and `candidate.json`) with
    `os.replace`. Nothing here installs a model: the installed model file and
-   `config/autobot.toml` are never touched. The interface (`make deploy`)
+   `config/autobot.toml` are never touched. The interface (`make launch`)
    compares the candidate with the installed model and installs it when the
    owner confirms (`autobot.wakeword.install`).
 
@@ -2210,7 +2210,7 @@ def train(run: Run, stage: str) -> None:
     )
     log(
         f"done in {(time.time() - started) / 60:.1f} min. {run.output.name} is a "
-        "candidate, ready for the interface: 'make deploy' compares it with the "
+        "candidate, ready for the interface: 'make launch' compares it with the "
         "installed model and installs it. The installed model and the "
         "configuration are unchanged."
     )

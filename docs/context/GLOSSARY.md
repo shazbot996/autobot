@@ -71,7 +71,7 @@ The glossary is autobot's vocabulary: the words the project uses, what each mean
 
 **wall UI.** The web UI the intake described, shown on a screen on the wall and driven by voice. No longer planned, and never built: ADR 0006 made the terminal user interface the application. Not the terminal user interface.
 
-**terminal user interface.** autobot's application: one full-screen `curses` interface on the NUC, opened by `make deploy`, whose first job is the studio (TS-1). Also written TUI. Not a control panel beside some other application, and not a second store of configuration: every setting it changes is written to `config/autobot.toml`.
+**terminal user interface.** autobot's application: one full-screen `curses` interface on the NUC, opened by `make launch`, whose first job is the studio (TS-1). Also written TUI. Not a control panel beside some other application, and not a second store of configuration: every setting it changes is written to `config/autobot.toml`.
 
 **studio.** The wake-word training studio: the screens of the terminal user interface that lead from an untrained listener to an installed model, namely the recording session, the training, the candidate, the live monitor and the dataset. Not a separate program.
 

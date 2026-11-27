@@ -32,6 +32,7 @@ models/
 data/
 
 # secrets
+secrets/
 .env
 .env.*
 *.pem
@@ -48,3 +49,7 @@ service-account*.json
 *.swp
 *~
 .DS_Store
+
+# the peer project `assistant` (CLAUDE.md): a separate project with its own
+# secrets and a Home Assistant configuration. Never part of this repository.
+assistant/

@@ -1,4 +1,4 @@
-"""`python -m autobot.tui`: open the terminal user interface (`make deploy`)."""
+"""`python -m autobot.tui`: open the terminal user interface (`make launch`)."""
 
 from autobot.tui.app import main
 

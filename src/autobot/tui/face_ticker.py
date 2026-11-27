@@ -15,11 +15,16 @@ else: the face runs no speech-to-text of its own (FS-3, `CN-1`).
   the phrase cannot be found in, the whole item is.
 
 The items lie along one strip, a gap apart, which enters at the right and
-moves one column with each `advance`, about ten a second. It moves two
-columns while more than half a width is waiting, and it is never more than
-one width behind: a feed that would leave it further behind skips ahead.
-What has scrolled off the left is dropped, and nothing is written anywhere:
-a transcript of the room is not something to keep.
+moves at a steady speed by the clock, `SPEED` columns a second, never more
+than one column a frame. A terminal can move text no finer than a column, so
+the smoothest scroll is one column at a time at even intervals: `due` says
+when the next column is due, and the screen times its next frame by it. While
+text waits to enter, the speed rises with the backlog, smoothly, up to
+`1 + CATCH_UP` times `SPEED` with a whole width waiting, and falls again as it
+clears. The strip is never more than one width behind: a feed that would
+leave it further behind skips ahead. What has scrolled off the left is
+dropped, and nothing is written anywhere: a transcript of the room is not
+something to keep.
 
 While the face holds the listener (`muted`) events are dropped, so nothing
 autobot says itself is shown. While the event stream is disconnected
@@ -41,6 +46,11 @@ MARKER_KINDS = ("openwakeword", "sherpa_kws")
 DEFAULT_MARKER = "*"
 # Blank columns between two items.
 GAP = 3
+# Columns a second the strip moves while nothing waits to enter: a little
+# faster than speech is spoken, so it seldom falls behind.
+SPEED = 16.0
+# How much faster it moves with a whole width waiting, as a multiple of SPEED.
+CATCH_UP = 1.0
 # The width assumed until the first `view`.
 DEFAULT_WIDTH = 68
 # What the ticker says while the listener's socket is absent.
@@ -147,6 +157,10 @@ class Ticker:
         self._items: list[_Item] = []
         self._head = 0
         self._end = 0
+        # The clock at the last `advance`, and how far towards the next
+        # column the strip has moved since, in columns.
+        self._clock: float | None = None
+        self._carry = 0.0
         # The stretch of the last score or transcript line.
         self._stretch: int | None = None
 
@@ -261,12 +275,33 @@ class Ticker:
         left = self._head - self.width
         self._items = [item for item in self._items if item.end > left]
 
-    def advance(self) -> None:
-        """One frame: the strip moves one column, or two while text is waiting."""
-        if self._down:
+    def speed(self) -> float:
+        """Columns a second: `SPEED`, rising smoothly with the text waiting."""
+        backlog = min(self.waiting, self.width) / max(1, self.width)
+        return SPEED * (1.0 + CATCH_UP * backlog)
+
+    def advance(self, now: float) -> None:
+        """One frame at `now`, in seconds: the strip moves on at its speed.
+
+        It moves at most one column, however long the frame was: a late frame
+        is not made up in a jump, which is what would make the scroll stutter.
+        """
+        last, self._clock = self._clock, now
+        if self._down or last is None:
+            self._carry = 0.0
             return
-        self._head += 2 if self.waiting > self.width // 2 else 1
-        self._catch_up()
+        self._carry += max(0.0, now - last) * self.speed()
+        if self._carry >= 1.0:
+            self._head += 1
+            self._carry = 0.0 if self._carry >= 2.0 else self._carry - 1.0
+            self._catch_up()
+
+    def due(self, now: float) -> float:
+        """Seconds from `now` until the next column is due; 0 when it is."""
+        if self._down or self._clock is None:
+            return 1.0 / SPEED
+        elapsed = max(0.0, now - self._clock)
+        return max(0.0, (1.0 - self._carry) / self.speed() - elapsed)
 
     def view(self, width: int) -> list[Cell]:
         """The `width` columns on show, left to right."""

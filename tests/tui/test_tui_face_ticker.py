@@ -1,13 +1,17 @@
 """`autobot.tui.face_ticker`: the face's ticker, fed recorded event lists."""
 
+import itertools
+import weakref
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from autobot.tui.face_ticker import (
+    CATCH_UP,
     DOWN_TEXT,
     GAP,
+    SPEED,
     Cell,
     Ticker,
     phrase_span,
@@ -63,9 +67,22 @@ def popped(cells: list[Cell]) -> str:
     return "".join(cell.char for cell in cells if cell.wake)
 
 
+# Each ticker's fake clock, in seconds.
+_CLOCKS: "weakref.WeakKeyDictionary[Ticker, float]" = weakref.WeakKeyDictionary()
+
+
+def step(ticker: Ticker, seconds: float = 1 / SPEED) -> None:
+    """One frame, `seconds` after the last: by default one column's time."""
+    if ticker not in _CLOCKS:
+        _CLOCKS[ticker] = 0.0
+        ticker.advance(0.0)
+    _CLOCKS[ticker] += seconds
+    ticker.advance(_CLOCKS[ticker])
+
+
 def run(ticker: Ticker, frames: int, width: int = WIDTH) -> list[Cell]:
     for _ in range(frames):
-        ticker.advance()
+        step(ticker)
     return ticker.view(width)
 
 
@@ -287,25 +304,53 @@ def test_a_long_feed_leaves_no_more_than_one_width_of_backlog() -> None:
     )
     assert ticker.waiting <= WIDTH
     for _ in range(200):
-        ticker.advance()
+        step(ticker)
         assert ticker.waiting <= WIDTH
     # What is on the strip is at most what is on show and what waits.
     assert len(ticker.text) <= 3 * WIDTH
 
 
-def test_waiting_text_moves_faster() -> None:
+def test_the_strip_moves_by_the_clock_one_column_at_a_time() -> None:
+    ticker = Ticker()
+    ticker.view(WIDTH)
+    ticker.feed([transcript("x" * 4)])
+    step(ticker)
+    # Frames closer together than a column's time move it only when it is due.
+    before = ticker.waiting
+    for _ in range(4):
+        step(ticker, 1 / SPEED / 4)
+    assert before - ticker.waiting == 1
+    # A frame that comes late moves one column, not a jump of several.
+    before = ticker.waiting
+    step(ticker, 1.0)
+    assert before - ticker.waiting == 1
+
+
+def test_due_says_when_the_next_column_is() -> None:
+    ticker = Ticker()
+    ticker.view(WIDTH)
+    ticker.advance(0.0)
+    assert ticker.due(0.0) == pytest.approx(1 / SPEED)
+    assert ticker.due(0.5 / SPEED) == pytest.approx(0.5 / SPEED)
+    assert ticker.due(1.0) == 0.0
+
+
+def test_waiting_text_moves_faster_and_slows_smoothly() -> None:
     ticker = Ticker()
     ticker.view(WIDTH)
     ticker.feed([transcript("x" * WIDTH)])
-    before = ticker.waiting
-    ticker.advance()
-    assert before - ticker.waiting == 2
-    ticker.feed([])
-    while ticker.waiting > WIDTH // 2:
-        ticker.advance()
-    before = ticker.waiting
-    ticker.advance()
-    assert before - ticker.waiting == 1
+    assert ticker.speed() == pytest.approx(SPEED * (1 + CATCH_UP))
+    speeds = []
+    while ticker.waiting:
+        speeds.append(ticker.speed())
+        before = ticker.waiting
+        step(ticker)
+        # Never more than one column a frame.
+        assert before - ticker.waiting == 1
+    assert ticker.speed() == SPEED
+    # The speed falls a little with each column, never in a jump.
+    assert all(a >= b for a, b in itertools.pairwise(speeds))
+    assert max(a - b for a, b in itertools.pairwise(speeds)) < 1.0
 
 
 def test_the_ticker_writes_nothing(

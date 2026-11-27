@@ -150,7 +150,7 @@ def test_every_screen_opens_and_the_interface_quits(tmp_path: Path) -> None:
 def test_the_menu_moves_with_the_arrows_and_quit_is_an_entry(tmp_path: Path) -> None:
     harness = make_harness(tmp_path, [UP, ENTER])
     assert harness.run() == 0
-    # Quit is the twelfth entry, after Agent routing: it has no number.
+    # Quit is the thirteenth entry, after Google Cloud: it has no number.
     assert harness.screen.saw("►    Quit")
 
 
@@ -926,6 +926,7 @@ def test_the_main_menu_lists_the_studio_first(tmp_path: Path) -> None:
         "9  Host",
         "0  Face",
         "   Agent routing",
+        "   Google Cloud",
         "   Quit",
     ]
     positions = [frame.index(label) for label in labels]

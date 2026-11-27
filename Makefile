@@ -24,7 +24,7 @@ help: ## Print this summary of the available commands
 	@echo "autobot: make targets"
 	@grep -hE '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) \
 		| awk -F ':.*## ' '{ printf "  %-15s %s\n", $$1, $$2 }'
-	@echo "\`make deploy\` opens the application: the full-screen terminal user interface."
+	@echo "\`make launch\` opens the application: the full-screen terminal user interface."
 
 # --- setup ------------------------------------------------------------------
 .PHONY: setup
@@ -83,9 +83,9 @@ logs: venv-check ## Print the end of the listener log (FOLLOW=1 keeps following 
 audio-check: venv-check ## Check the NUC's audio hardware: list devices, record 2 s, play it back (NUC only)
 	@$(PYTHON) -m autobot.audio_check
 
-# --- deploy -----------------------------------------------------------------
-.PHONY: deploy
-deploy: venv-check ## Open the application: the wake-word training studio and the settings screens
+# --- launch -----------------------------------------------------------------
+.PHONY: launch
+launch: venv-check ## Open the application: the wake-word training studio and the settings screens
 	@$(PYTHON) -m autobot.tui
 
 # --- fetch-models -----------------------------------------------------------
@@ -101,7 +101,7 @@ fetch-models: venv-check ## Fetch the model files into models/ (TRAIN=1 adds the
 # --- train-wakeword ---------------------------------------------------------
 # Trains the wake-word model on the CPU and writes it as a candidate
 # (models/wakeword/candidate.onnx and candidate.json), which the interface
-# (`make deploy`) compares and installs: the installed model and
+# (`make launch`) compares and installs: the installed model and
 # config/autobot.toml are never touched here. The recordings in data/voice/ are
 # trained on beside the synthetic speech, with the held-out share kept for the
 # evaluation; with no recordings it trains on synthetic speech alone. The first

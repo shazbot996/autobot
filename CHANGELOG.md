@@ -3,6 +3,19 @@ type: changelog
 title: "Changelog — autobot"
 authority: historical
 status: active
+provenance:
+  - written: schiele/build-the-google-cloud-configuration-screen-plan
+    at: 2026-11-27T15:56:20Z
+    mode: revise
+  - written: schiele/key-step-creates-the-service-account-first
+    at: 2026-11-27T16:06:04Z
+    mode: revise
+  - written: schiele/google-cloud-screen-fixes-from-the-first-real-run
+    at: 2026-11-27T16:41:28Z
+    mode: revise
+  - written: schiele/choose-the-gemini-model-on-the-screen
+    at: 2026-11-27T17:06:00Z
+    mode: revise
 ---
 
 # Changelog — autobot
@@ -42,6 +55,13 @@ Unlike the other starter documents, the entry below is not tutorial text to swee
 - F1 shows the keys of the screen it is opened on (the session's Enter, P, R, D, N, B; the monitor's R, W, M, S; the Dataset screen's P, D, E; the training pane's S and C), then the keys that work everywhere, and names the menu keys only on a screen that is a menu.
 - `make fetch-models` names each of the listener's model files as fetched or already there, the piper voice and the `sherpa_kws` model among them.
 - ADR 0006, recording that the full-screen terminal user interface is the application and that the wake-word model is trained on the owner's voice first, superseding the parts of ADR 0005 it names.
+- Google Cloud screen (2026-11-27), built from `docs/plans/active/google-cloud-configuration-screen-PLAN.md` steps 1 to 7 against `docs/specs/active/autobot-google-cloud-configuration-screen-SPEC.md` (GC-1 to GC-13). **Google Cloud** on the main menu walks the owner through connecting autobot to the project in eight steps: Project, APIs, Service account, Key, Secret Manager, Gemini, Rate limits and Cloud Storage. Each step reads *ready*, *missing*, *unchecked* (with the reason) or *not used yet*. Enter opens a step: what it is for, what was checked and found, and the `gcloud` commands that fix what is missing, filled in from the configuration. autobot only shows the commands; the owner runs them. `W` writes the open step's commands to `run/gcp/<step>.sh`, and `R` checks every step again. It was checked with a fake Google Cloud and by opening it in a pseudo-terminal on a checkout with no key. It has not been run against the real project: no service account key exists yet, and an agent never uses the owner's credentials.
+- `src/autobot/gcp/`, the logic of that screen, which does no drawing: the catalogue of the APIs, roles, permissions and secrets autobot needs (`needs.py`), the `gcloud` commands and scripts (`commands.py`), the key-file check (`keyfile.py`), the connection as the service account and the `GoogleCloud` seam the checks go through (`client.py`), the eight steps (`checks.py`) and the store of a pasted secret (`secrets.py`). It calls Google Cloud's REST APIs through `google-auth` and `requests`, which are new runtime dependencies, and refuses any host that is not one of the APIs it needs.
+- `[gcp]` in `config/autobot.toml`: `project`, `region`, `service_account`, `credentials_file`, `gemini_api` and `buckets`, and one `[[gcp.quotas]]` entry (`api`, `metric`, `limit`) for each intended cap on a billed API. The Project step writes `project` and `region`; the rest is edited in the file. The three seeded quota ids are the usual names of the per-day and per-minute request quotas and have not been checked against the project.
+- A masked field in the interface (`App.prompt_secret`): each typed or pasted character is drawn as `*`, and the value is kept in a buffer that is cleared after use. The Secret Manager step uses it to store a pasted secret as a new version through the service account.
+- An open step of the Google Cloud screen is drawn without the frame's side borders, and each command stands alone on its rows from the left edge, so that selecting it with the mouse copies the command and nothing else. A command longer than the screen is continued with a backslash, so the rows pasted together are still one command.
+- The catalogue of roles has one role more than GC-6's table: `roles/cloudquotas.viewer`, read-only, on the project. Reading a quota's live limit by its id goes through the Cloud Quotas API, and none of the six roles of the table holds `cloudquotas.quotas.get`. The spec's table does not list it yet.
+- The Gemini model is a setting, `[gcp] gemini_model`, chosen on the Gemini step of the Google Cloud screen. Enter on **Model** lists the Gemini models Vertex AI offers at that moment, asked as the service account, newest first, and writes the one chosen to the config file; a model the list lacks can be typed. The step reads *missing* when no model is chosen or when the chosen one is no longer offered. A cap on a per-model quota is for the chosen model unless its entry names a `base_model`, so choosing another model moves the cap's check to it. The first model is `gemini-3.5-flash-lite`. The spec has no rule for this yet.
 
 ### Changed
 
@@ -59,6 +79,15 @@ Unlike the other starter documents, the entry below is not tutorial text to swee
 - A screen of the interface opens on the config file as it is at that moment, so an edit made by hand while the interface is open is read, not overwritten from memory; a file that no longer parses is one line and the last good configuration stays.
 - On the Candidate screen the scroll note has a row of its own and no longer covers the last figure, and a candidate whose evaluation file cannot be read is refused in one line before the question.
 - The `Makefile` no longer carries the "not built yet" stub helper or the path of the prototype plan: every target is built.
+- `make launch` opens the application; it was `make deploy`, a name kept for cloud deployments. `make deploy` no longer exists.
+- The Face screen's ticker scrolls smoothly. It moves by the clock at a steady speed, one column at a time, and the screen draws each frame when the next column is due. Before, it moved once per frame of up to 100 ms, jumped two columns at a time while text was waiting, and stalled when a key was pressed. While text is waiting it now speeds up and slows down gradually.
+- The main menu has a thirteenth entry, **Google Cloud**, after **Agent routing**. In a terminal of the minimum height the rule between the menu and the state panel is left out, so that the panel keeps its four rows.
+- `make test` puts `tests/` on the import path (`pythonpath` in `pyproject.toml`), so that a test under `tests/tui/` can use the fake Google Cloud of `tests/gcp/`.
+- The Key step of the Google Cloud screen, and `run/gcp/key.sh`, create the service account first when it does not exist yet, and the step says so. Started at the Key step on a project with no account, the commands failed with "Unknown service account". The line that creates the account, there and on the Service account step, now does nothing when the account exists, so it can be run again. The headings above an open step's commands are shell comments from the left edge, so a selection that takes one in still pastes: before, "To look for yourself" was run as a command.
+- Fixes to the Google Cloud screen from its first run against the real project (2026-11-27). A step that Google Cloud refuses the service account says that its roles are most likely not granted yet and points at the Service account step. When an expected secret is empty and its API key exists, the Secret Manager step shows the command that copies the key's value into the secret through a pipe, without showing it, and the one that prints it for the masked field.
+- `[[gcp.quotas]]` in `config/autobot.toml` now holds the Weather API's real quota ids, listed from the project: the API has no quota for the whole API, so each of its seven endpoints is capped at 100 a day and 10 a minute, in fourteen entries. The Vertex AI id is still an unchecked guess.
+- A `[[gcp.quotas]]` entry may name a `base_model`, for a quota that is counted per model, as Vertex AI's Gemini quotas are. The cap command then carries the model as a dimension beside the region, and the live limit compared is that model's. A per-model quota with no model named reads *missing* and says to add one. The Vertex AI entry now holds the real quota id, listed from the project, and no model yet.
+- Gemini on Vertex AI is left without a cap for now, by the owner's decision (2026-11-27): the cap of 10 requests a minute was refused as an increase, because Google's own limit for the chosen model in `us-east5` is already lower. Its `[[gcp.quotas]]` entry is out of `config/autobot.toml`, with a comment saying how to put one back. A billed API with no entry is now a warning on the Rate limits step and no longer makes the step *missing*, which differs from GC-10 as the spec states it.
 
 ### Removed
 
@@ -68,6 +97,9 @@ Unlike the other starter documents, the entry below is not tutorial text to swee
 ### Security
 
 - The listener disables `onnxruntime`'s usage telemetry (`ORT_DISABLE_TELEMETRY=1`, set before the library is imported, and in the systemd unit), which would otherwise make network calls from the speech path.
+- autobot reaches Google Cloud only as its dedicated service account (GC-4). The connection is refused, before any call, unless the key file exists, git ignores its path and only its owner can read it, and unless the credentials resolve to the configured service account; it never falls back to the owner's own login. `secrets/` is git-ignored. The key file is never opened by autobot's own code, shown or copied.
+- A pasted secret goes to Secret Manager and nowhere else (GC-9): it is never drawn, logged, written to a file or put in an error's text, and the buffer it was typed into is cleared whether the call worked or not.
+- autobot never runs a `gcloud` command or a script it writes (GC-2). A test reads the package's source to keep it so.
 
 ## 0.1.0 - Seeded Workspace
 

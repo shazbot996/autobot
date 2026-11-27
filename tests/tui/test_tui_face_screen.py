@@ -16,7 +16,7 @@ from tui_fakes import (
     make_harness,
 )
 
-from autobot.tui.app import MIN_HEIGHT, MIN_WIDTH
+from autobot.tui.app import FRAME_MS, MIN_HEIGHT, MIN_WIDTH
 from autobot.tui.echo import FINISHED, HEARD, PLAYING_BACK, RECORD_SECONDS, SPEECH_LINE
 from autobot.tui.face_ticker import DOWN_TEXT
 from autobot.tui.router import LISTENING, ROUTED
@@ -130,10 +130,13 @@ def test_face_opens_from_the_main_menu_with_its_layout(
 def test_a_wake_pops_on_the_ticker_and_the_eyes_react(tmp_path: Path) -> None:
     rows = MIN_HEIGHT
     harness = make_harness(tmp_path, [], theme="dark", rows=rows, cols=MIN_WIDTH)
+    clock = FakeClock()
+    harness.app.services.clock = clock
     screen = harness.screen
     before: list[list[str]] = []
     after: list[list[str]] = []
     popped: list[tuple[str, int, int]] = []
+    delays: list[int] = []
 
     def look(into: list[list[str]]) -> Key:
         return lambda: into.append(character(screen.text()))
@@ -144,6 +147,11 @@ def test_a_wake_pops_on_the_ticker_and_the_eyes_react(tmp_path: Path) -> None:
         at = text.index("autobot")
         hey = text.index("hey")
         popped.append((text, screen.attr_at(row, at), screen.attr_at(row, hey)))
+        # The face times its frames by the ticker's next column.
+        delays.append(screen.delay)
+
+    def frame() -> None:
+        clock.now += FRAME
 
     screen.keys = [
         FACE,
@@ -152,7 +160,7 @@ def test_a_wake_pops_on_the_ticker_and_the_eyes_react(tmp_path: Path) -> None:
         lambda: harness.events.feed(*woke(1)),
         -1,
         look(after),
-        *[-1] * 14,
+        *[frame] * 14,
         ticker,
         ESC,
         "q",
@@ -163,6 +171,7 @@ def test_a_wake_pops_on_the_ticker_and_the_eyes_react(tmp_path: Path) -> None:
     assert "hey autobot" in text
     assert wake_attr == theme.wake
     assert plain_attr == theme.normal != theme.wake
+    assert 1 <= delays[0] < FRAME_MS
     assert before[0] != after[0]
     assert screen.saw("listener: connected")
     # The wake only wakes autobot: it listens for a command, and no echo runs.
@@ -175,15 +184,20 @@ def test_a_disconnected_stream_puts_the_down_sentence_on_the_ticker(
 ) -> None:
     rows = MIN_HEIGHT
     harness = make_harness(tmp_path, [], rows=rows, cols=MIN_WIDTH)
+    clock = FakeClock()
+    harness.app.services.clock = clock
     shown: list[str] = []
 
     def look() -> None:
         shown.append(harness.screen.text().splitlines()[ticker_row(rows)])
 
+    def frame() -> None:
+        clock.now += FRAME
+
     harness.screen.keys = [
         FACE,
         lambda: harness.events.feed(heard("good morning", 1)),
-        *[-1] * 14,
+        *[frame] * 14,
         look,
         harness.events.drop,
         -1,

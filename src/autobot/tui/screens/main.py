@@ -17,6 +17,7 @@ from autobot.tui.screens.audio import AudioScreen
 from autobot.tui.screens.candidate import CandidateScreen
 from autobot.tui.screens.dataset import DatasetScreen, minutes_text
 from autobot.tui.screens.face import FaceScreen
+from autobot.tui.screens.gcp import GcpScreen
 from autobot.tui.screens.host import HostScreen
 from autobot.tui.screens.monitor import open_monitor
 from autobot.tui.screens.routing import RoutingScreen
@@ -46,6 +47,9 @@ TAGLINE = "wake-word training studio"
 # The menu's column; the banner takes the rest of the width.
 MENU_WIDTH = 30
 BANNER_ROWS = 5
+# The rows the state panel under the menu needs: two for the state's
+# sentence, then the dataset line and the training line.
+PANEL_ROWS = 4
 # How often the dataset line is counted again while the menu is on top.
 STATS_SECONDS = 10.0
 
@@ -162,6 +166,12 @@ class MainMenu(MenuView):
                 lambda: app.push(RoutingScreen(app)),
                 "The rules that hand a command after the wake to an agent",
             ),
+            MenuItem(
+                "Google Cloud",
+                lambda: app.push(GcpScreen(app)),
+                "Connect autobot to Google Cloud as its own service account, "
+                "one step at a time",
+            ),
             MenuItem("Quit", app.quit, "Leave autobot"),
         ]
 
@@ -175,11 +185,15 @@ class MainMenu(MenuView):
         self.draw_banner(
             canvas, Rect(rect.y, rect.x + menu_width, rows, rect.width - menu_width)
         )
-        if rows < rect.height - 1:
+        # The panel needs four rows. A terminal of the minimum height has
+        # exactly those under the menu, so the rule above it is left out there.
+        ruled = rect.height - rows - 1 >= PANEL_ROWS
+        if ruled:
             canvas.rule(rect, rows, canvas.theme.frame)
+        top = rows + 1 if ruled else rows
+        if top < rect.height:
             self.draw_panel(
-                canvas,
-                Rect(rect.y + rows + 1, rect.x, rect.height - rows - 1, rect.width),
+                canvas, Rect(rect.y + top, rect.x, rect.height - top, rect.width)
             )
 
     def draw_banner(self, canvas: Canvas, rect: Rect) -> None:

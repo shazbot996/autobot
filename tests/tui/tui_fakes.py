@@ -14,6 +14,8 @@ import numpy as np
 
 from autobot.audio_check import DeviceKind
 from autobot.config import Config
+from autobot.gcp.client import GcpError, GoogleCloud
+from autobot.gcp.keyfile import IGNORED, NOT_IGNORED
 from autobot.tui.app import App, Services
 from autobot.tui.audio import BlockHandler, Clip, InputStream, Samples
 from autobot.tui.config_edit import ConfigStore
@@ -30,6 +32,7 @@ from autobot.tui.ui import Glyphs, Theme
 from autobot.wakeword.dataset import VOICE_DIR, VoiceDataset
 from autobot.wakeword.evaluate import KindScores, RealScores
 from autobot.wakeword.script import Prompt
+from gcp.gcp_fakes import FakeGoogleCloud, write_key
 
 CONFIG_TEXT = """\
 # autobot configuration: the comments here must survive every write.
@@ -153,6 +156,7 @@ class FakeScreen:
         self.frames: list[str] = []
         # The background attribute the application set, as curses' `bkgd` takes it.
         self.background = 0
+        self.delay = -1
         self.erase()
 
     def getmaxyx(self) -> tuple[int, int]:
@@ -168,6 +172,10 @@ class FakeScreen:
 
     def bkgd(self, character: str, attr: int = 0) -> None:
         self.background = attr
+
+    def timeout(self, delay: int) -> None:
+        # How long the last `getch` would have waited for a key, in milliseconds.
+        self.delay = delay
 
     def attr_at(self, y: int, x: int) -> int:
         return self.attrs[y][x]
@@ -398,6 +406,11 @@ class Harness:
     events: FakeEvents
     # autobot's voice: a fixture clip for every line, no model.
     voice: FakeVoice
+    # The fake Google Cloud the Google Cloud screen connects to; None when the
+    # harness was made without one, as a checkout with no key.
+    cloud: FakeGoogleCloud | None = None
+    # How often the interface connected to Google Cloud.
+    connects: list[Path] = field(default_factory=list)
 
     def run(self) -> int:
         return self.app.run()
@@ -437,6 +450,9 @@ def make_harness(
     glyphs: Glyphs | None = None,
     score_real: Callable[[Path, VoiceDataset, str], RealScores] = nothing_held_out,
     score_kind: Callable[[str, Config, VoiceDataset], KindScores] = no_baseline,
+    cloud: FakeGoogleCloud | None = None,
+    key_ignored: bool = True,
+    connect_error: str = "",
 ) -> Harness:
     """The real `App` on fakes.
 
@@ -448,6 +464,13 @@ def make_harness(
     Candidate screen needs no model; it runs inline, not on a thread.
     `score_kind` stands in for the baseline kind's scoring; the default has
     nothing held out, so the screen shows no baseline column.
+
+    `cloud` is the fake Google Cloud the Google Cloud screen reaches: giving
+    one also puts an empty stand-in for the service account's key at the
+    configured path under `tmp_path`, so the key reads *ready*. Without one
+    there is no key file, as on a fresh checkout. `key_ignored=False` has the
+    fake git say the key's path is not ignored. `connect_error` is the one
+    line the connection is refused with.
     """
     config_file = tmp_path / "autobot.toml"
     config_file.write_text(config_text, encoding="utf-8")
@@ -458,6 +481,16 @@ def make_harness(
     dataset = VoiceDataset(tmp_path / VOICE_DIR)
     events = FakeEvents()
     voice = FakeVoice()
+
+    connects: list[Path] = []
+
+    def connect(config: Config, repo: Path) -> GoogleCloud:
+        connects.append(repo)
+        if connect_error:
+            raise GcpError(connect_error)
+        if cloud is None:
+            raise GcpError("refused: no key")
+        return cloud
 
     def wpctl(argv: Sequence[str]) -> CommandResult:
         wpctl_calls.append(list(argv))
@@ -482,7 +515,11 @@ def make_harness(
         score_kind=score_kind,
         spawn=lambda function: FunctionTask(function, inline=True),
         voice=voice,
+        gcp_connect=connect,
+        git_check_ignore=lambda repo, path: IGNORED if key_ignored else NOT_IGNORED,
     )
+    if cloud is not None or connect_error:
+        write_key(services.store.load().gcp, tmp_path)
     if script is not None:
         chosen = list(script)
         services.build_script = lambda phrase, table: list(chosen)
@@ -503,4 +540,6 @@ def make_harness(
         dataset,
         events,
         voice,
+        cloud,
+        connects,
     )

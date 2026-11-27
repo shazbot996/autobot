@@ -12,6 +12,7 @@ the repository (`run/`, `models/`, the config file itself).
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -35,6 +36,26 @@ TUI_THEMES = ("light", "dark", "sun")
 # The agents a routing rule can hand a command to. The echo is the first.
 AGENT_ECHO = "echo"
 ROUTE_AGENTS = (AGENT_ECHO,)
+
+# The Gemini API the `question` agent calls (GC-11): Vertex AI, as the service
+# account, or the Gemini Developer API, with an API key kept as a secret.
+GEMINI_VERTEX_AI = "aiplatform.googleapis.com"
+GEMINI_DEVELOPER_API = "generativelanguage.googleapis.com"
+GEMINI_APIS = (GEMINI_VERTEX_AI, GEMINI_DEVELOPER_API)
+
+# What every service account's address ends in.
+SERVICE_ACCOUNT_DOMAIN = ".iam.gserviceaccount.com"
+
+# A Google Cloud project id: 6 to 30 lower-case letters, digits and hyphens,
+# starting with a letter and not ending in a hyphen.
+_PROJECT_ID = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]")
+# A region, as `us-east5` or `northamerica-northeast1`.
+_REGION = re.compile(r"[a-z]+(-[a-z]+)+[0-9]+")
+# A model's id, as it stands in a request: `gemini-2.5-flash`.
+_MODEL_ID = re.compile(r"[a-z0-9][a-z0-9._-]{1,62}")
+_SERVICE_ACCOUNT = re.compile(
+    r"[a-z0-9][a-z0-9-]*@[a-z0-9.-]+" + re.escape(SERVICE_ACCOUNT_DOMAIN)
+)
 
 # An audio device: a substring of a device name, or a numeric index.
 type DeviceSpec = str | int
@@ -106,6 +127,48 @@ DEFAULT_ROUTES = (RouteConfig(command="echo", agent=AGENT_ECHO),)
 
 
 @dataclass(frozen=True)
+class QuotaConfig:
+    """One intended cap on a billed API (GC-10)."""
+
+    # The API the cap is on, as `weather.googleapis.com`.
+    api: str
+    # The quota id `gcloud beta quotas info list --service=<api>` prints. The
+    # cap's period (a day, a minute) is part of the id.
+    metric: str
+    # The live limit must be at or below this.
+    limit: int
+    # For a quota that is counted per model (Vertex AI's are): the model the
+    # cap is for, as `gemini-2.5-flash`. Empty for any other quota.
+    base_model: str = ""
+
+
+@dataclass(frozen=True)
+class GcpConfig:
+    """How autobot reaches Google Cloud: only as its own service account (GC-4)."""
+
+    project: str = "schiele-autobot-dev"
+    region: str = "us-east5"
+    service_account: str = "autobot-agent@schiele-autobot-dev.iam.gserviceaccount.com"
+    # The service account's key, relative to the repository root. Only the
+    # path is configuration: the file is a credential and is git-ignored (GC-7).
+    credentials_file: str = "secrets/service-account-autobot-agent.json"
+    # One of `GEMINI_APIS`.
+    gemini_api: str = GEMINI_VERTEX_AI
+    # The Gemini model the question agent calls, as `gemini-2.5-flash`; empty
+    # until one is chosen on the Gemini step. A cap on a quota that is counted
+    # per model is for this model unless its entry names another.
+    gemini_model: str = ""
+    # The Cloud Storage buckets autobot is meant to use; none yet (GC-12).
+    buckets: tuple[str, ...] = ()
+    quotas: tuple[QuotaConfig, ...] = ()
+
+    @property
+    def credentials_path(self) -> Path:
+        """The absolute path of the key file."""
+        return resolve_repo_path(self.credentials_file)
+
+
+@dataclass(frozen=True)
 class Config:
     host: HostConfig
     audio: AudioConfig
@@ -114,6 +177,7 @@ class Config:
     tui: TuiConfig = TuiConfig()
     # The routing rules, in the order they are tried.
     routes: tuple[RouteConfig, ...] = DEFAULT_ROUTES
+    gcp: GcpConfig = GcpConfig()
     # The file the configuration was loaded from; None when built from a mapping.
     path: Path | None = None
 
@@ -165,7 +229,9 @@ def load_config(path: str | Path | None = None) -> Config:
 
 def parse_config(data: Mapping[str, object], path: Path | None = None) -> Config:
     """Validate parsed TOML and build the `Config`. Messages name the offending key."""
-    _reject_unknown(data, "", ("host", "audio", "wake_phrases", "ack", "tui", "routes"))
+    _reject_unknown(
+        data, "", ("host", "audio", "wake_phrases", "ack", "tui", "routes", "gcp")
+    )
 
     host_table = _table(data, "host", required=False)
     _reject_unknown(host_table, "host", ("nuc_hostname",))
@@ -213,8 +279,133 @@ def parse_config(data: Mapping[str, object], path: Path | None = None) -> Config
         ack=ack,
         tui=TuiConfig(theme=theme),
         routes=_routes(data),
+        gcp=_gcp(data),
         path=path,
     )
+
+
+def project_complaint(text: str) -> str | None:
+    """Why `text` is not a Google Cloud project id; None when it is one."""
+    if _PROJECT_ID.fullmatch(text):
+        return None
+    return "a project id is 6 to 30 lower-case letters, digits and hyphens"
+
+
+def region_complaint(text: str) -> str | None:
+    """Why `text` is not a Google Cloud region; None when it is one."""
+    if _REGION.fullmatch(text):
+        return None
+    return "a region looks like us-east5"
+
+
+def model_complaint(text: str) -> str | None:
+    """Why `text` is not a model's id; None when it could be one."""
+    if _MODEL_ID.fullmatch(text):
+        return None
+    return "a model id looks like gemini-2.5-flash"
+
+
+def _gcp(data: Mapping[str, object]) -> GcpConfig:
+    """The `[gcp]` table and its `[[gcp.quotas]]` entries; the defaults when absent."""
+    table = _table(data, "gcp", required=False)
+    _reject_unknown(
+        table,
+        "gcp",
+        (
+            "project",
+            "region",
+            "service_account",
+            "credentials_file",
+            "gemini_api",
+            "gemini_model",
+            "buckets",
+            "quotas",
+        ),
+    )
+    project = _str(table, "gcp", "project", default=GcpConfig.project)
+    complaint = project_complaint(project)
+    if complaint:
+        raise ConfigError(f"[gcp] project = {project!r} is not valid: {complaint}")
+    region = _str(table, "gcp", "region", default=GcpConfig.region)
+    complaint = region_complaint(region)
+    if complaint:
+        raise ConfigError(f"[gcp] region = {region!r} is not valid: {complaint}")
+    account = _str(table, "gcp", "service_account", default=GcpConfig.service_account)
+    if not _SERVICE_ACCOUNT.fullmatch(account):
+        raise ConfigError(
+            f"[gcp] service_account = {account!r} must be a service account's "
+            f"address, ending in {SERVICE_ACCOUNT_DOMAIN}"
+        )
+    gemini_api = _str(table, "gcp", "gemini_api", default=GcpConfig.gemini_api)
+    if gemini_api not in GEMINI_APIS:
+        raise ConfigError(
+            f"[gcp] gemini_api = {gemini_api!r} is not one of: {', '.join(GEMINI_APIS)}"
+        )
+    gemini_model = _str(table, "gcp", "gemini_model", default="").strip()
+    complaint = model_complaint(gemini_model) if gemini_model else None
+    if complaint:
+        raise ConfigError(
+            f"[gcp] gemini_model = {gemini_model!r} is not valid: {complaint}"
+        )
+    return GcpConfig(
+        project=project,
+        region=region,
+        service_account=account,
+        credentials_file=_str(
+            table,
+            "gcp",
+            "credentials_file",
+            default=GcpConfig.credentials_file,
+            non_empty=True,
+        ),
+        gemini_api=gemini_api,
+        gemini_model=gemini_model,
+        buckets=_buckets(table),
+        quotas=_quotas(table),
+    )
+
+
+def _buckets(table: Mapping[str, object]) -> tuple[str, ...]:
+    raw = table.get("buckets", [])
+    if not isinstance(raw, list) or not all(
+        isinstance(name, str) and name.strip() for name in raw
+    ):
+        raise ConfigError("[gcp] buckets must be a list of bucket names")
+    names = tuple(str(name).strip() for name in raw)
+    for name in names:
+        if names.count(name) > 1:
+            raise ConfigError(f"[gcp] buckets lists {name!r} more than once")
+    return names
+
+
+def _quotas(table: Mapping[str, object]) -> tuple[QuotaConfig, ...]:
+    raw = table.get("quotas", [])
+    if not isinstance(raw, list):
+        raise ConfigError("[[gcp.quotas]] must be one or more tables")
+    entries: list[QuotaConfig] = []
+    for number, item in enumerate(raw, start=1):
+        where = f"gcp.quotas #{number}"
+        if not isinstance(item, dict):
+            raise ConfigError(f"[[gcp.quotas]] entry #{number} must be a table")
+        _reject_unknown(item, where, ("api", "metric", "limit", "base_model"))
+        if "limit" not in item:
+            raise ConfigError(f"[{where}] missing key: limit")
+        entry = QuotaConfig(
+            api=_str(item, where, "api", non_empty=True).strip(),
+            metric=_str(item, where, "metric", non_empty=True).strip(),
+            limit=_positive_int(item, where, "limit", default=0),
+            base_model=_str(item, where, "base_model", default="").strip(),
+        )
+        if any(
+            (entry.api, entry.metric, entry.base_model)
+            == (other.api, other.metric, other.base_model)
+            for other in entries
+        ):
+            raise ConfigError(
+                f"[[gcp.quotas]] {entry.api} {entry.metric} is configured more than once"
+            )
+        entries.append(entry)
+    return tuple(entries)
 
 
 def _routes(data: Mapping[str, object]) -> tuple[RouteConfig, ...]:

@@ -9,6 +9,7 @@ describes:
   - config/autobot.toml
   - src/autobot/config.py
   - src/autobot/routing.py
+  - src/autobot/fetch_models.py
   - src/autobot/tui/config_edit.py
   - src/autobot/agents/__init__.py
   - src/autobot/agents/base.py
@@ -73,6 +74,9 @@ provenance:
     mode: create
   - run: schiele/0114
     at: 2026-11-27T18:03:47.150Z
+    mode: revise
+  - run: schiele/0115
+    at: 2026-11-27T18:06:46.030Z
     mode: revise
 ---
 
@@ -193,16 +197,17 @@ This is an initial plan. Nothing of the spec is built: there is no `src/autobot/
 
 ## 8. The `weather` agent: the lookup, the key and the rate
 
-**Files:** new `src/autobot/agents/weather.py`, `src/autobot/agents/weather_api.py`, `tests/agents/test_agent_weather.py`; modified `src/autobot/gcp/client.py`, `tests/gcp/gcp_fakes.py`, `tests/gcp/test_gcp_client.py`, `src/autobot/agents/registry.py`, `src/autobot/tui/app.py`, `tests/tui/tui_fakes.py`.
+**Files:** new `src/autobot/agents/weather.py`, `src/autobot/agents/weather_api.py`, `tests/agents/test_agent_weather.py`; modified `src/autobot/gcp/client.py`, `src/autobot/fetch_models.py`, `tests/gcp/gcp_fakes.py`, `tests/gcp/test_gcp_client.py`, `src/autobot/agents/registry.py`, `src/autobot/tui/app.py`, `tests/tui/tui_fakes.py`.
 
 - `gcp/client.py`: `GoogleCloud.secret_value(secret) -> bytearray` reads the latest enabled version through `secrets/<name>/versions/latest:access`, decodes the payload into a `bytearray` the caller clears; `FakeGoogleCloud` answers from its stored versions. Reading needs `secretmanager.versions.access`, which the catalogue's `roles/secretmanager.secretAccessor` already grants.
+- `fetch_models.py`: `make fetch-models` also fetches the Census ZCTA gazetteer (about 1 MB, US zip-code centroids) into `models/geo/`, the one target that downloads.
 - `weather_api.py`:
-  - `Lookup` protocol: `today(zip_code, key) -> Forecast` and `days(zip_code, key) -> Forecast`, where `Forecast` is plain data (place, condition, temperatures, precipitation, a line per day). `GoogleWeather` implements it over `requests` against `https://weather.googleapis.com/v1/currentConditions:lookup` and `forecast/days:lookup`, with the key as a query parameter, refusing any other host, and turning every failure into a one-line `WeatherError` that never contains the key. The zip code is resolved to a latitude and longitude by `locate(zip_code)`; see the open question.
+  - `Lookup` protocol: `today(zip_code, key) -> Forecast` and `days(zip_code, key) -> Forecast`, where `Forecast` is plain data (place, condition, temperatures, precipitation, a line per day). `GoogleWeather` implements it over `requests` against `https://weather.googleapis.com/v1/currentConditions:lookup` and `forecast/days:lookup`, with the key as a query parameter, refusing any other host, and turning every failure into a one-line `WeatherError` that never contains the key. Google's Weather API takes a latitude and longitude, so the zip code is resolved by `locate(zip_code)`, which reads the gazetteer under `models/geo/` locally; no second API is called and the key stays restricted to the one API. A missing table is one line naming `make fetch-models`, and a zip code not in the table is one line naming the zip code.
   - `RateControl(daily_limit, minute_limit, path)`: keeps the moments of the calls in `run/weather-calls.json`, refuses a call past either limit with one line saying which limit and when it clears (AG-6: the agent's control is the first line; GC-10's cap is the backstop), and records a call only when it goes out.
 - `weather.py`: `uses_model=False`, `sends_requests=True`. Its experience: refuse when `zip_code` is empty (`the weather agent has no zip code: set it in the Agent editor`); connect as the service account through `Services.gcp_connect` and read `secret` with `secret_value` (a missing key, a refused identity or an empty secret is one *trouble* line, AG-12); run the before-a-request `Confirmation` when `confirm_request` is on; check the rate; then do the lookup on `Services.spawn` with the eyes *working*, and respond: mode `""` is today's conditions as a short spoken narrative with a detail visual of the day; mode `forecast` is the days ahead, one line a day (AG-7). The key is cleared after the call.
 - `Services.weather_lookup: Lookup` defaults to `GoogleWeather()`; tests give `FakeLookup`.
 
-**Done when:** `test_gcp_client.py` shows `secret_value` on the fake returns the stored bytes and a 404 is one line. `test_agent_weather.py` shows: with a `FakeLookup` and a fake cloud holding the key, mode `""` calls `today` once and the summary is one sentence naming the condition and temperature; mode `forecast` calls `days`; an empty zip code, no key file, and an empty secret each end in one *trouble* line without a lookup; the eleventh call in a minute is refused by `RateControl` with a line naming the minute limit and nothing is looked up; the key's bytes are zero after the call; `confirm_request` on asks first and "no" skips the lookup.
+**Done when:** `test_gcp_client.py` shows `secret_value` on the fake returns the stored bytes and a 404 is one line. `test_agent_weather.py` shows: with a `FakeLookup` and a fake cloud holding the key, mode `""` calls `today` once and the summary is one sentence naming the condition and temperature; mode `forecast` calls `days`; an empty zip code, no key file, and an empty secret each end in one *trouble* line without a lookup; the eleventh call in a minute is refused by `RateControl` with a line naming the minute limit and nothing is looked up; the key's bytes are zero after the call; `confirm_request` on asks first and "no" skips the lookup; `locate` against a small gazetteer written to a temporary directory returns the latitude and longitude of a known zip code, a zip code not in it is one line, and a missing table is one line naming `make fetch-models`.
 
 ## 9. The `question` agent and the Gemini ADK seam
 
@@ -252,9 +257,9 @@ This is an initial plan. Nothing of the spec is built: there is no `src/autobot/
 
 **Files:** modified `AGENTS.md`, `README.md`, `CHANGELOG.md`.
 
-- `AGENTS.md`: the interface's screens gain **Agent editor** and **Word lists** and lose **Face** from the menu; Tab opens the face and Tab or Esc leaves it; the agents are `echo`, `question`, `weather` (`forecast`), `time`, `camera` (`cameras`) and `introduce`; the camera agent and `run/agents.log` are named; the weather key is read only through `gcp.client`.
+- `AGENTS.md`: the interface's screens gain **Agent editor** and **Word lists** and lose **Face** from the menu; Tab opens the face and Tab or Esc leaves it; the agents are `echo`, `question`, `weather` (`forecast`), `time`, `camera` (`cameras`) and `introduce`; the camera agent and `run/agents.log` are named; the weather key is read only through `gcp.client`; `make fetch-models` also fetches the zip-code table under `models/geo/`.
 - `README.md` "Running it": Tab opens the face; the first commands to try are "time", "introduce", "weather" once a zip code and key are set, and "I have a question ...".
-- `CHANGELOG.md` Unreleased: the agent tree, the game screen (map, protagonist, the level), the Agent editor, the Word lists screen, the two modes and Tab, the mode on a rule, the five agents, the confirmations, `cancel`, the listening setting, and the multi-line and array writes of the config editor.
+- `CHANGELOG.md` Unreleased: the agent tree, the game screen (map, protagonist, the level), the Agent editor, the Word lists screen, the two modes and Tab, the mode on a rule, the five agents, the confirmations, `cancel`, the listening setting, the offline zip-code table, and the multi-line and array writes of the config editor.
 
 **Done when:** the three files carry those lines, `node .agents/skills/cr2-conformance/scripts/check.mjs` passes when run outside cr2, and `make test`, `make lint` and `make typecheck` pass.
 
@@ -270,6 +275,7 @@ This is an initial plan. Nothing of the spec is built: there is no `src/autobot/
 8. **The before-a-request confirmation is run by the agent** through `FaceContext.confirm`, since only the agent knows when its request is about to go; the on-the-way-in one is run by the router, which owns that moment.
 9. **Detached processes are started through one `Services.launch`** writing to `run/agents.log`, so the camera agent and any later agent that runs a local command share one tested path.
 10. **The ADK runs with an in-memory session for one turn.** No state is kept yet (AG-11); the first agent that keeps some chooses the ADK session service pointed at the NUC.
+11. **The zip code becomes coordinates through an offline table**, the Census ZCTA gazetteer fetched into `models/geo/` by `make fetch-models` and read locally by `weather_api.locate`, rather than Google's Geocoding API. It adds no API, no key widening and no call per lookup.
 
 ## 15. Out of scope
 
@@ -302,8 +308,7 @@ This is an initial plan. Nothing of the spec is built: there is no `src/autobot/
 - **docs/specs/active/autobot-the-face-SPEC.md, rules-first-routing-SPEC.md, agent-sessions-SPEC.md.** As the spec's "Changes needed elsewhere" lists: FS-1, FS-9, FS-13, FS-15; RR-2 and the rule form with `mode`; AS-3 and the first definition shape.
 - **docs/context/SCHEMA.md.** The `[[agents]]` table as step 1 defines it (`name`, `description`, `prompt`, `confirm_entry`, `confirm_entry_question`, `confirm_request`, `confirm_request_question`, `listening`, and the owned keys `zip_code`, `daily_limit`, `minute_limit`, `secret`, `folder`, `commands`), `mode` on the rule, `agent` widened, the `[words]` table with its three lists and defaults, and `run/weather-calls.json` and `run/agents.log` under runtime state.
 - **docs/context/GLOSSARY.md, ARCH.md, CONSTRAINTS.md.** As the spec lists; ARCH also names `Services.launch`, `Services.model` and `Services.weather_lookup` as seams tests fake.
-- **docs/specs/active/autobot-google-cloud-configuration-screen-SPEC.md.** If the open question below is answered with the Geocoding API, GC-5's table and GC-9's key restriction gain that API; with the offline table, nothing changes.
 
 ## Open Questions
 
-- **Zip code to coordinates.** Google's Weather API takes a latitude and longitude, not a zip code, and AG-6 makes the zip code the whole location setting with the API key as the only other credential. Resolving it needs either Google's Geocoding API (a second billed API on GC-5, and a key restricted to two APIs instead of one) or an offline table of US zip-code centroids. Recommended: the offline table (the Census ZCTA gazetteer, about 1 MB, fetched into `models/geo/` by `make fetch-models`, the one target that downloads, and read locally by `weather_api.locate`), because it adds no API, no key widening and no call per lookup, and a missing table is then one line naming `make fetch-models` like every other missing file.
+None.

@@ -35,18 +35,30 @@ phrase = "autobot"
 #                   enough to run all day. Needs `model`.
 #   "text_match"    the local transcript contains the phrase. The fallback: it
 #                   needs no trained model, but transcribes all speech it hears.
-kind = "openwakeword"
+#   "sherpa_kws"    sherpa-onnx's keyword spotter listens for the phrase as it
+#                   is spelled. It needs no training: the baseline the trained
+#                   model is measured against. It ignores `model`.
+# A fresh install starts on "text_match": no trained model is installed yet.
+kind = "text_match"
 # Path of the model file, relative to the repository root. Required for
-# "openwakeword", unused by "text_match". `make train-wakeword` writes it,
-# with its evaluation beside it (autobot.json).
-model = "models/wakeword/autobot.onnx"
+# "openwakeword", unused by "text_match" and "sherpa_kws". The studio
+# (`make deploy`) installs the trained model: it writes kind, model and
+# threshold here when the owner confirms a candidate, with the model's
+# evaluation beside it (autobot.json).
+model = ""
 # Score from 0 to 1 at which the detector fires. Higher means fewer false
 # accepts and more misses; autobot.json lists both for a sweep of thresholds
-# and recommends one. For "text_match" use 0.5.
-threshold = 0.85
+# and recommends one. For "text_match" use 0.5. For "sherpa_kws" 0.5 is
+# sherpa-onnx's own default, and the value does little until it is high.
+threshold = 0.5
 target = "ack"
 
 [ack]
 text = "Yes?"
 # A piper-tts voice name. Synthesis is local (CONSTRAINTS.md CN-2).
-voice = "en_US-lessac-medium"
+voice = "en_US-joe-medium"
+
+[tui]
+# The colour theme of the terminal user interface: "light", "dark" or "sun".
+# Pressing T in the interface switches to the next one and writes it here.
+theme = "sun"

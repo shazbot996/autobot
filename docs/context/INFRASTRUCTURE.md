@@ -10,11 +10,14 @@ provenance:
   - run: schiele/0101
     at: 2026-11-27T17:22:03.312Z
     mode: revise
+  - written: schiele/gpu-inference-server-host-on-wsl
+    at: 2026-11-27T20:49:06Z
+    mode: revise
 ---
 
 # autobot — Infrastructure
 
-This document records the environments and accounts autobot runs in and talks to, with their identifiers. The NUC's details were read from the machine during the headless wake-word prototype build and the wake-word training studio build, which both ran on it. The Google Cloud details come from `config/autobot.toml`, the Google Cloud configuration screen spec (`docs/specs/active/autobot-google-cloud-configuration-screen-SPEC.md`) and the code in `src/autobot/gcp/`. The screen was corrected against the real project on 2026-11-27. So far it is used only to configure the project and test the setup; no agent calls Google Cloud yet. An identifier that is not known is an open question, not a guess.
+This document records the environments and accounts autobot runs in and talks to, with their identifiers: the NUC, the GPU inference server `GAMEON1` and the LAN between them, and the Google Cloud project. The NUC's details were read from the machine during the headless wake-word prototype build and the wake-word training studio build, which both ran on it. The Google Cloud details come from `config/autobot.toml`, the Google Cloud configuration screen spec (`docs/specs/active/autobot-google-cloud-configuration-screen-SPEC.md`) and the code in `src/autobot/gcp/`. The screen was corrected against the real project on 2026-11-27. So far it is used only to configure the project and test the setup; no agent calls Google Cloud yet. An identifier that is not known is an open question, not a guess.
 
 ## One section per environment or account: what exists there, with its identifiers
 
@@ -33,11 +36,59 @@ This document records the environments and accounts autobot runs in and talks to
 - Holds the Google Cloud service account's key, the only credential autobot uses, at `[gcp] credentials_file`, which is `secrets/service-account-autobot-agent.json` in the checkout. `.gitignore` covers `secrets/` and the `service-account*.json` pattern. The key is created by the script on the Key step of the Google Cloud screen, which leaves the directory at `0700` and the file at `0600`, owned by the owner's user. autobot reads only the file's metadata, and Google's sign-in code reads the key itself (GC-7).
 - The owner's own `gcloud` login and Application Default Credentials are kept up to date on this host for his shell, so that he can run the commands the Google Cloud screen shows. autobot never uses them (GC-4).
 - Holds the scripts the Google Cloud screen writes with `W`, under `run/gcp/` (git-ignored). Today there are three: `service-account.sh`, `secrets.sh` and `quotas.sh`.
-- Is intended to run the rest as it is built: local STT and TTS for queries and responses, the rules layer, the agent host, and the local store of agent state.
+- Is intended to run the rest as it is built: local STT and TTS for queries and responses, the rules layer, the agent host, and the local store of agent state. Since 2026-11-27 the heavier speech-to-text and the local language model are planned to run on the GPU inference server below, with the NUC keeping its own models as the fallback (IS-4); the NUC stays the front end and the only home of agent state.
 
-### Test environment: WSL on the Windows 11 dev server
+### GPU inference server: `GAMEON1` (Windows 11 PC, Ubuntu in WSL2)
 
-- The owner's Windows 11 dev server has a WSL layer, but autobot does not support it. Support is limited to the Intel NUC, and testing happens locally on the NUC.
+The owner's Windows PC, added on 2026-11-27 to be autobot's GPU inference server on the LAN. Its planned role is to serve speech-to-text, a local language model for routing and for the core conversational agent, and possibly text-to-speech, to the NUC over the LAN. The NUC stays the front end. The server's behaviour is specified in `docs/specs/active/autobot-gpu-inference-server-SPEC.md` (IS-1 to IS-14). **Nothing of autobot runs here yet**: no server code exists, no port is open to the LAN, no firewall rule, start-up task or address reservation has been made. The facts below were read from the machine on 2026-11-27 from inside WSL (`wsl.exe --version`, `nvidia-smi`, `lscpu`, `free`, `df`, `ip`, and read-only PowerShell `Get-*` and `powercfg` queries); nothing was changed.
+
+- **Windows.** Windows 11 Home, version 10.0.26200.7623 (build 26200). Computer name `GAMEON1`, in the workgroup `WORKGROUP` (no domain). The Windows user profile is `charl`.
+- **WSL.** WSL 3.0.5.0, WSL kernel 6.18.58.1-1 (`6.18.58.1-microsoft-standard-WSL2`), WSLg 1.0.79. One distribution, `Ubuntu-24.04`, WSL version 2, Ubuntu 24.04.5 LTS. Its default user is `schiele` and systemd is on (`/etc/wsl.conf`: `[boot] systemd=true`); `systemctl is-system-running` reads `running`.
+- **CPU.** AMD Ryzen 7 5800X3D (the X3D model, not the plain 5800): 8 cores, 16 threads.
+- **Memory.** 32 GB in the machine (Windows reports 34,264,817,664 bytes physical). WSL sees 15 GiB and 4 GiB of swap, which is WSL's default share of half the host's memory; `.wslconfig` sets no `memory` limit.
+- **Disk.** The WSL root filesystem is a 1007 GB virtual disk with 954 GB free. `C:` (`/mnt/c`) is 931 GB with 849 GB free.
+- **GPU.** NVIDIA GeForce RTX 2080 Ti, 11,264 MiB of VRAM (about 307 MiB already taken by the Windows desktop at idle), compute capability 7.5 (Turing), PCIe gen 3. Windows driver 610.88 (`32.0.16.1088`); `nvidia-smi` inside WSL is 610.57.01 and reports CUDA user-mode version 13.3. The GPU is reached from WSL through the driver's `/usr/lib/wsl/lib/libcuda.so`. No CUDA toolkit is installed in WSL (no `/usr/local/cuda`, no `nvcc`). Turing has no bfloat16 and is not supported by FlashAttention 2, which narrows the inference runtimes (IS-10).
+- **Python.** 3.12.3, the distribution's. `python3-venv` and `pip` are **not installed** (`ensurepip` is missing), so `make setup` cannot build a `.venv` here until `sudo apt install python3.12-venv python3-pip` is run inside WSL. No `make`, `node`, `docker`, `ollama` or `uv` is installed, so neither the `make` targets nor the cr2 conformance check (`node .agents/skills/cr2-conformance/scripts/check.mjs`) can run here yet; `sudo apt install make nodejs` would add them.
+- **Networking.** Mirrored networking is active: `C:\Users\charl\.wslconfig` holds `[wsl2] networkingMode=mirrored`, and WSL's `eth0` carries the Windows adapter's own address. WSL and Windows therefore share one LAN address and one port space.
+  - LAN address `192.168.86.53/24`, gateway `192.168.86.1`, on the Windows adapter `Ethernet` (MAC `A0-36-BC-B8-C2-71`). The address is from **DHCP** (`Dhcp: Enabled`); no reservation is known to exist (see Open Questions). IPv6 unique-local addresses in `fd67:429b:36e0:d20::/64` are also assigned.
+  - Hostname inside WSL is `GAMEON1`. The LAN's DNS resolves `gameon1.lan` to `192.168.86.53`.
+  - Windows classifies the LAN as a **Public** network. The Windows Firewall is on for all three profiles.
+  - The Hyper-V firewall that guards WSL under mirrored mode (VM creator `{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}`) is enabled with `DefaultInboundAction: Block`, `DefaultOutboundAction: Allow`, `LoopbackEnabled: True` and `AllowHostPolicyMerge: True`. Its only WSL-specific inbound rules today allow some ICMP and mDNS; nothing lets TCP into WSL from the LAN.
+  - From WSL the NUC answers: `branch.lan` resolves to `192.168.86.200` and replies to ping in about 1 ms. Whether the NUC can reach this host was not tested, since nothing listens here yet.
+- **Power.** The active plan is `Balanced`. Sleep after idle and hibernate after idle on AC are both `0` (never). The machine supports S3 standby, hibernate and Fast Startup. Whether its network adapter can wake the machine (Wake-on-LAN) could not be read: `Get-NetAdapterPowerManagement` failed with "A device attached to the system is not functioning".
+- **Start-up.** No scheduled task starts WSL. WSL starts only when something on Windows runs `wsl.exe`, so after a reboot nothing of the distribution runs until the owner opens it.
+- **What does not apply here.** No microphone or speaker is used here; the NUC-only refusals (TS-11) stay as they are, because this host's hostname is not `host.nuc_hostname`. The `assistant` project does not exist on this host, so the `camera` agent cannot run here. No voice dataset, Google Cloud key or `gcloud` login exists here, and none is to (IS-6, IS-7).
+
+### The LAN between them (planned)
+
+Nothing below is in place yet; it is what IS-2, IS-3 and IS-13 ask for, recorded here so that the NUC side and the owner's Windows steps agree. The commands that need the owner's rights are listed, not run.
+
+- **Addressing.** The two hosts are on the same `/24`, `192.168.86.0/24`, behind the router at `192.168.86.1`. The NUC is `192.168.86.200` (`branch.lan`); how that address is held (static or reserved) is not recorded. This host is `192.168.86.53` by DHCP. The planned approach is a **DHCP reservation on the router** for MAC `A0-36-BC-B8-C2-71` at `192.168.86.53`, rather than a static address set in Windows, because a reservation lives in one place and survives a Windows reinstall. The NUC is to name the server by address in `config/autobot.toml` (IS-3), not by `gameon1.lan`, so that a DNS lapse cannot break it.
+- **Port.** One TCP port on this host, proposed `8300` (IS-2), carrying the whole HTTP API. It avoids the ports the `assistant` project uses on the NUC (8099, 8123, 8199). Under mirrored mode a server bound to `0.0.0.0:8300` inside WSL is reached at `192.168.86.53:8300` once the firewalls let it in; no `netsh portproxy` is needed.
+- **Firewall.** Two layers must let the NUC in, and only the NUC (IS-13). The owner runs these himself, in PowerShell **as Administrator**; neither has been run or tested:
+
+  ```powershell
+  # Hyper-V firewall: lets the NUC's TCP into WSL on the server's port
+  New-NetFirewallHyperVRule -Name "autobot-inference-in" -DisplayName "autobot inference server (from NUC)" `
+    -Direction Inbound -VMCreatorId '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' `
+    -Protocol TCP -LocalPorts 8300 -RemoteAddresses 192.168.86.200 -Action Allow
+  # Windows Firewall: the same, on every profile, since the LAN is classed Public
+  New-NetFirewallRule -Name "autobot-inference-in" -DisplayName "autobot inference server (from NUC)" `
+    -Direction Inbound -Protocol TCP -LocalPort 8300 -RemoteAddress 192.168.86.200 -Profile Any -Action Allow
+  ```
+
+  Whether the second rule is needed alongside the first, given `AllowHostPolicyMerge: True`, is to be confirmed when the port is first tested from the NUC. Changing the LAN's category to Private (`Set-NetConnectionProfile -InterfaceAlias Ethernet -NetworkCategory Private`) is an alternative to `-Profile Any`, left to the owner.
+- **Start on boot.** Planned: a Windows scheduled task that starts the distribution at boot and keeps a `wsl.exe` process alive so WSL does not shut the VM down when idle, and inside WSL a systemd unit for the server (systemd is already on). The task needs the owner's password to run with nobody logged in; the owner registers it **as Administrator**. Not run or tested:
+
+  ```powershell
+  $a = New-ScheduledTaskAction -Execute "wsl.exe" -Argument "-d Ubuntu-24.04 -u schiele --exec sleep infinity"
+  $t = New-ScheduledTaskTrigger -AtStartup
+  $s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit 0 -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+  Register-ScheduledTask -TaskName "autobot-wsl" -Action $a -Trigger $t -Settings $s -User "GAMEON1\charl" -Password (Read-Host "Password for charl")
+  ```
+
+  Inside WSL the server's unit will need `sudo` to install if it is a system unit, or `loginctl enable-linger schiele` if it is a user unit, as the NUC's listener is. Which, and the unit's name, is for the server's plan.
+- **When this host is off or asleep.** The NUC must not depend on it (IS-4): its wake word, microphone, speaker and face never pass through this host. A request to the server is bounded by a short timeout, the NUC keeps a health check of the server, and while it is unreachable the NUC falls back to what it already has: faster-whisper `tiny.en` on its CPU for speech-to-text, piper on its CPU for text-to-speech, and its rules and Gemini agents for the rest. Today the plan sleeps the machine never on AC, but Windows Update restarts and a user's sleep or shutdown still take it away, and after a restart nothing runs until the start-up task above exists. Waking it from the NUC (Wake-on-LAN) is unverified.
 
 ### Google Cloud: `cambiumplatform.com` organization
 
@@ -70,6 +121,8 @@ Two files define what runs on the NUC:
 
 `pyproject.toml` defines the Python package and its dependencies, and `make setup` builds the `.venv` the unit runs from. `make fetch-models` fetches the model files into `models/`, and `make train-wakeword` trains a wake-word candidate there, which becomes the installed model only through the interface. Nothing defines the voice dataset but the recordings themselves: it cannot be rebuilt from the repository. The rest of the NUC is set up by hand: the operating system, PipeWire and its default source and sink, and lingering.
 
+Nothing in the repository defines the GPU inference server yet. `GAMEON1`'s Windows side (the `.wslconfig`, the firewall rules, the start-up task, the power plan) and the router's DHCP reservation are set by hand by the owner; the server's own code, its systemd unit template and its section of `config/autobot.toml` are to come from the server's plan, and will be named here when they exist.
+
 The Google Cloud side has no infrastructure-as-code. Two files declare what it should hold:
 
 - The `[gcp]` table of `config/autobot.toml`, with its `[[gcp.quotas]]` entries, declares the project, the region, the service account, the key's path, the Gemini API and model, the buckets and the intended caps.
@@ -80,6 +133,8 @@ The Google Cloud screen builds the `gcloud` commands from those two files and ch
 ## Settled without asking
 
 - **Resolved.** The earlier text said Cloud Run would authenticate as a dedicated service account. The spec and the code have the agents running on the NUC as `autobot-agent`, through its key. The document now says that nothing runs on Cloud Run, and the question about what Cloud Run runs is gone.
+- **Resolved.** The earlier text said the Windows dev server's WSL layer is not supported and is no test machine. The owner has made that machine, `GAMEON1`, the GPU inference server (2026-11-27). The section now records it as such; it is still not a place where the listener, the studio or any audio path runs.
+- **Corrected.** The owner described the CPU as a Ryzen 7 5800; the machine reports a Ryzen 7 5800X3D.
 - **Resolved.** The earlier text said autobot uses the owner's Application Default Credentials while testing locally. GC-4 has autobot point Application Default Credentials at the service account's key and refuse any other identity. The owner's own login and default credentials are now recorded as being for his shell only.
 
 ## Changes needed elsewhere
@@ -87,6 +142,13 @@ The Google Cloud screen builds the `gcloud` commands from those two files and ch
 - **docs/specs/active/autobot-google-cloud-configuration-screen-SPEC.md.** Drop the `docs/context/INFRASTRUCTURE.md` line from its Changes needed elsewhere, because this document now records the project, region, service account, key path, model, caps and the owner's credentials on the host.
 
 ## Open Questions
+
+- **GPU server: address reservation.** `GAMEON1` holds `192.168.86.53` by DHCP with no known reservation. Recommended: reserve it on the router for MAC `A0-36-BC-B8-C2-71`. Which router it is, and whether the NUC's `192.168.86.200` is itself reserved or static, are not recorded.
+- **GPU server: firewall.** Neither rule above has been made, and whether the Hyper-V rule alone is enough under `AllowHostPolicyMerge` is untested. The owner decides between `-Profile Any` and reclassifying the LAN as Private.
+- **GPU server: start-up and idle shutdown.** No start-up task exists. Whether a held `sleep infinity` is the right way to keep the WSL VM up with systemd services, or whether WSL 3.0.5 keeps a systemd distribution running on its own, is unverified. Running the task with nobody logged in needs the owner's stored password on a Home edition machine.
+- **GPU server: sleep and wake.** Sleep is off on AC today. Is the machine also used as the owner's own PC (it is named `GAMEON1`), so that games or Windows Update restarts take the GPU and the host away at times? Can it be woken from the NUC (Wake-on-LAN could not be read)?
+- **GPU server: WSL memory.** WSL gets 15 GiB of the 32 GB. Is that enough for the server's CPU-side work, or should `.wslconfig` set `memory=`? That is a Windows-side change for the owner.
+- **GPU server: Python setup.** `python3.12-venv` and `python3-pip` are missing in WSL; installing them needs `sudo` in WSL, which the owner runs.
 
 - **Which resources are in place today.** This document records what the configuration names and the screen checks for. It does not record the screen's readings: whether every API is enabled, every role granted, the key created, the secret holding a version, and the fourteen caps accepted. Recommended: after the next round of checks, mark here anything that is not *ready*, since a descriptive document should say what a person would find.
 - **Billing account.** The billing account `schiele-autobot-dev` is linked to is not recorded. Recommended: record its id here (it is an identifier, not a secret), so that the spend on the uncapped Gemini API can be traced.

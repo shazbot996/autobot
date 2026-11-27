@@ -3,6 +3,10 @@ type: constraints
 title: "autobot — Constraints"
 authority: prescriptive
 status: active
+provenance:
+  - written: schiele/gpu-inference-server-host-on-wsl
+    at: 2026-11-27T20:49:06Z
+    mode: revise
 ---
 
 # autobot — Constraints
@@ -31,3 +35,4 @@ Constraints are the non-negotiable rules of autobot. They are fewer and harder t
 
 - The owner's intake also makes local persistence of agent state a core purpose (Q4) and names cost as the reason the listener is local (Q1). Neither was stated under Q6, so they are recorded as decisions (ADR 0002) and in the brief, not as constraints. Should either become a constraint?
 - Does CN-1 permit sending the finished text transcript to the cloud for agent reasoning? The intake implies yes (Q5 connects to a Gemini agent in GCP), but Q6 does not say so in words.
+- Do `CN-1` and `CN-2` allow speech-to-text and text-to-speech on another of the owner's machines in the house? Both say "on the local machine". The planned inference server on `GAMEON1` (`autobot-gpu-inference-server-SPEC.md`, IS-8) is on the owner's LAN and involves no cloud service, but it is not the NUC. The rules are unchanged until the owner amends them on purpose.

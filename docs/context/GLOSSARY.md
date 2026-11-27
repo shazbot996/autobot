@@ -3,11 +3,17 @@ type: glossary
 title: "autobot — Glossary"
 authority: prescriptive
 status: active
+provenance:
+  - written: schiele/gpu-inference-server-host-on-wsl
+    at: 2026-11-27T20:49:06Z
+    mode: revise
 ---
 
 # autobot — Glossary
 
 The glossary is autobot's vocabulary: the words the project uses, what each means here, and what it does not mean. Specs cite it instead of redefining terms. The entries also prime CR2's in-browser speech-to-text, so each starts with its term in bold, spelled exactly as the project spells it, and the terms most likely to be misheard come first.
+
+Revised 2026-11-27: the WSL entry no longer says the Windows machine is unsupported, and the inference server and `GAMEON1` are added, since the owner made that machine the GPU inference server.
 
 ## One entry per term: what it means here, and what it does not
 
@@ -27,9 +33,13 @@ The glossary is autobot's vocabulary: the words the project uses, what each mean
 
 **ScoreEvent.** The record the listener publishes for every stretch of speech, one per configured wake phrase: what that detector made of the stretch, with the stretch's identifier. It goes to `run/listener.sock` only, never to the log; see `SCHEMA.md`. Not a wake: most stretches are scored and wake nothing.
 
-**NUC.** The dedicated Intel NUC running Ubuntu that is the 24x7 home of autobot, with its own local audio hardware. Its hostname is `branch`. It is the only machine autobot supports, and builds are run on it.
+**NUC.** The dedicated Intel NUC running Ubuntu that is the 24x7 home of autobot, with its own local audio hardware. Its hostname is `branch`. It is the only machine autobot's audio paths and front end support, and builds are run on it; the inference server runs on `GAMEON1`.
 
-**WSL.** The Windows Subsystem for Linux layer on the owner's Windows 11 dev server. autobot does not support it: support is limited to the NUC (`INFRASTRUCTURE.md`). Not a test machine for autobot.
+**WSL.** The Windows Subsystem for Linux layer on `GAMEON1`, the owner's Windows 11 PC, running the `Ubuntu-24.04` distribution in which the inference server is to run (`INFRASTRUCTURE.md`). Not a place where the listener, the studio or any audio path runs: those stay on the NUC.
+
+**Inference server.** The second program of autobot, planned to run in WSL on `GAMEON1` and to serve the NUC over the LAN with GPU speech-to-text, a local language model for routing and chat, and possibly text-to-speech (`autobot-gpu-inference-server-SPEC.md`, IS-1 to IS-14). Not a cloud service, not the front end, and not where agent state or memory lives. Also called the GPU server.
+
+**GAMEON1.** The hostname of the owner's Windows 11 PC with the RTX 2080 Ti, at `192.168.86.53` on the LAN, the home of the inference server. Not the NUC, and not a machine autobot's audio paths support.
 
 **PWA.** A progressive web app: the form the intake described for autobot's user interface, shown full-screen in Chrome on the local host. No longer planned: the application's interface is the terminal user interface (ADR 0006). See wall UI.
 

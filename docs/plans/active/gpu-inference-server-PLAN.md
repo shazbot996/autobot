@@ -111,6 +111,9 @@ provenance:
   - run: schiele/0134
     at: 2026-11-27T21:29:48.265Z
     mode: revise
+  - run: schiele/0135
+    at: 2026-11-27T21:34:07.324Z
+    mode: revise
 ---
 
 # GPU Inference Server — Implementation Plan
@@ -153,12 +156,12 @@ Implements the autobot — GPU inference server spec (`docs/specs/active/autobot
 
 **Files:** modified `src/autobot/config.py`, `config/autobot.toml`; new `tests/test_config_server.py`; modified `tests/test_config_agents.py`.
 
-- `ServerConfig`, frozen, parsed from `[server]`, every key defaulted and every unknown key refused: `enabled` (true), `url` (`http://192.168.86.53:8300`), `token_file` (`secrets/server-token`, resolved with `resolve_repo_path`), `hostname` (`GAMEON1`), the timeouts of IS-4 (`health_timeout`, `stt_timeout_base`, `stt_timeout_per_second`, `route_timeout`, `chat_first_token_timeout`, `chat_timeout`), the poll intervals of IS-23 (`poll_up_seconds`, `poll_down_min_seconds`, `poll_down_max_seconds`), the thresholds of IS-17 (`tier2_threshold`, `tier3_threshold`), `hint_chars` (the cap of IS-16), `tool_rounds` (IS-21), and the server's own settings read on `GAMEON1`: `stt_model` (`models/faster-whisper/large-v3-turbo`), `stt_compute_type` (`int8_float16` or `float16`), `llm_model` (empty until `make server-eval` names one), `llm_context` (8192), `runtime` (`ollama`), `runtime_url` (`http://127.0.0.1:11434`), and `embedding_model` (the NUC's tier 2 model path). `url` must parse as `http://host:port`; the port is what the server binds.
+- `ServerConfig`, frozen, parsed from `[server]`, every key defaulted and every unknown key refused: `enabled` (true), `url` (`http://192.168.86.53:8300`), `token_file` (`secrets/server-token`, resolved with `resolve_repo_path`), `hostname` (`GAMEON1`), the timeouts of IS-4 (`health_timeout`, `stt_timeout_base`, `stt_timeout_per_second`, `route_timeout`, `chat_first_token_timeout`, `chat_timeout`), the poll intervals of IS-23 (`poll_up_seconds`, `poll_down_min_seconds`, `poll_down_max_seconds`), the thresholds of IS-17 (`tier2_threshold`, `tier3_threshold`), `hint_chars` (the cap of IS-16), `tool_rounds` (IS-21), `core_listen_seconds` (10, how long the core agent's session stays open for the next turn, separate from the router's `LISTEN_SECONDS`), and the server's own settings read on `GAMEON1`: `stt_model` (`models/faster-whisper/large-v3-turbo`), `stt_compute_type` (`int8_float16` or `float16`), `llm_model` (empty until `make server-eval` names one), `llm_context` (8192), `runtime` (`ollama`), `runtime_url` (`http://127.0.0.1:11434`), and `embedding_model` (the NUC's tier 2 model path: the int8 ONNX file of `all-MiniLM-L6-v2`, with its `tokenizer.json` beside it). `url` must parse as `http://host:port`; the port is what the server binds.
 - `AgentConfig` gains `model` (`none`, `local`, `gemini`; default `none`, `gemini` for `question`), `fallback` (a list; each entry one of the three values or, last only, a spoken line), `parameters` (`[[agents.parameters]]`: `name`, `type` in `string`/`integer`/`number`/`boolean`, `values`, `required`) and `tools` (`[[agents.tools]]`: `name`, `description`, `parameters` in the same shape). `RouteConfig` gains `examples`, a list of phrases for tier 2. `AGENT_CORE = "core"` joins `ROUTE_AGENTS` and `DEFAULT_AGENTS`, with `model = "local"`, `fallback = ["gemini", "the server is away"]`, a first personality prompt and `listening = true`.
 - `config/autobot.toml` gains the `[server]` table with comments, the `core` agent's table, `model` on `question`, and no route for `core` (it is the default of IS-17, not a command).
-- Tests: the shipped file loads; each new key's refusal message names the key; a `fallback` with a spoken line not last fails; a `parameters` entry with an unknown type fails.
+- Tests: the shipped file loads; each new key's refusal message names the key; a `fallback` with a spoken line not last fails; a `parameters` entry with an unknown type fails; `core_listen_seconds` defaults to 10 and a value of zero or below is refused.
 
-**Done when:** `load_config()` on the shipped file returns `config.server.url == "http://192.168.86.53:8300"` and `config.agent("core").model == "local"`, and `make test` passes with the new tests.
+**Done when:** `load_config()` on the shipped file returns `config.server.url == "http://192.168.86.53:8300"`, `config.server.core_listen_seconds == 10` and `config.agent("core").model == "local"`, and `make test` passes with the new tests.
 
 ## 2. The contract
 
@@ -239,14 +242,14 @@ Implements the autobot — GPU inference server spec (`docs/specs/active/autobot
 
 ## 9. The routing cascade
 
-**Files:** new `src/autobot/cascade.py`, `src/autobot/embedding.py`, `tests/test_cascade.py`, `tests/test_embedding.py`; modified `src/autobot/routing.py`, `src/autobot/fetch_models.py`, `src/autobot/tui/router.py`, `src/autobot/tui/tree_game.py`, `src/autobot/tui/screens/routing.py`, `tests/tui/test_tui_router.py`.
+**Files:** new `src/autobot/cascade.py`, `src/autobot/embedding.py`, `tests/test_cascade.py`, `tests/test_embedding.py`; modified `pyproject.toml`, `src/autobot/routing.py`, `src/autobot/fetch_models.py`, `src/autobot/tui/router.py`, `src/autobot/tui/tree_game.py`, `src/autobot/tui/screens/routing.py`, `tests/tui/test_tui_router.py`.
 
-- `embedding.py`: a small sentence-embedding model under `[server] embedding_model`, run with `onnxruntime` behind `enforce_offline()`, loaded from a local path; `make fetch-models` fetches it; cosine similarity of the transcript against each route's `command` and `examples`, embedded once per config load. Behind an `Embedder` protocol with a fake.
+- `embedding.py`: `all-MiniLM-L6-v2` as an int8 ONNX file under `[server] embedding_model`, run with `onnxruntime` behind `enforce_offline()` and tokenized with the `tokenizers` package, which `pyproject.toml` gains as a NUC dependency. Both the model and its `tokenizer.json` load from a local path with no network at runtime; `make fetch-models` is the only thing that fetches them. Cosine similarity of the transcript against each route's `command` and `examples`, embedded once per config load. Behind an `Embedder` protocol with a fake.
 - `cascade.py`: `decide(transcript, config, embedder, server) -> Decision | None`, running tier 1 (`match_route`), tier 2 (best route above `tier2_threshold`), tier 3 (`client.route` with the IS-9 agent list, when `watch.ready("route")`), and one `admit()` for all three: agent exists, mode among the agent's modes (its routes' modes plus `""`), parameters validate against the definition's `parameters`, confidence at or above the tier's threshold (tier 1 is 1.0). `Decision` carries the tier.
 - `Router._listen` calls the cascade after the action keywords; the detail line names the tier (`tier 2: 0.81 -> weather agent`), and `Position` gains `tier` so the map's edge can mark it. When nothing is admitted: `core` is launched with the transcript if `watch.ready("chat")`, otherwise the summary says "I didn't catch that." and the router keeps listening. `Launch` gains `parameters`.
 - The Agent routing screen edits `examples` on a rule.
 
-**Done when:** in the tests, "what's it like outside" with no keyword match routes to `weather` by tier 2 on a fake embedder, a fake server answer naming an agent not in the config is refused and the router falls to `core`, and with the fake watcher `down` the same transcript ends in "I didn't catch that."
+**Done when:** in the tests, "what's it like outside" with no keyword match routes to `weather` by tier 2 on a fake embedder, a fake server answer naming an agent not in the config is refused and the router falls to `core`, and with the fake watcher `down` the same transcript ends in "I didn't catch that."; the embedding test loads the model and tokenizer from a temporary local path with the network blocked.
 
 ## 10. Agent tiers and the local model
 
@@ -264,12 +267,12 @@ Implements the autobot — GPU inference server spec (`docs/specs/active/autobot
 **Files:** new `src/autobot/agents/core.py`, `tests/agents/test_agent_core.py`; modified `src/autobot/agents/registry.py`, `src/autobot/agents/tree.py`, `src/autobot/agents/base.py`, `tests/agents/agent_fakes.py`.
 
 - `Core` is an `Experience`: it keeps `messages` on the NUC for the session only (AG-11), sends them whole with the system prompt (the definition's `prompt`) and a `response_schema` that is AG-4's two parts plus an optional `handoff: {agent: enum[gemini agents], query}`, and the definition's `tools`. Before each request the oldest turns are dropped until the estimated tokens fit `llm_context` minus a reply margin.
-- Streaming: tokens are gathered into sentences and each sentence is a `Speaker`, so speech starts at the first full sentence; the detail panel shows the time to the first token. After a reply it listens for the next turn for `LISTEN_SECONDS` and ends the session when nothing comes; `cancel` ends it at once.
+- Streaming: tokens are gathered into sentences and each sentence is a `Speaker`, so speech starts at the first full sentence; the detail panel shows the time to the first token. After a reply it listens for the next turn for `[server] core_listen_seconds` (10 by default, not the router's `LISTEN_SECONDS`) and ends the session when that time elapses with no speech; `cancel` ends it at once.
 - Handoff: when the answer names a `handoff`, the NUC asks that agent's `confirm_request` question if it is on (AG-13), shows a "thinking" cue at once, and calls the `gemini` model through `choose` for that agent, within GC-10's caps; the server is never asked to.
 - Tools: a `tool_calls` answer runs each named tool from a `Tools` seam on the NUC (`agent_fakes.FakeTool` in tests) and sends the results back as tool messages, for at most `tool_rounds` rounds, then stops with a trouble line.
 - `registry` adds `core` (uses_model, sends_requests); `tree` adds its node at the agents' level, drawn as the default of the level.
 
-**Done when:** on the rig with a fake streaming model, the core agent speaks the first sentence before the stream ends, keeps the previous turn in its next request, hands a `handoff` to the `question` agent's fake after a yes, runs a fake tool for one round, and says "the server is away" when the fake watcher is `down` and the `gemini` fake has no model.
+**Done when:** on the rig with a fake streaming model, the core agent speaks the first sentence before the stream ends, keeps the previous turn in its next request, ends its session when a fake clock passes `core_listen_seconds` with no speech, hands a `handoff` to the `question` agent's fake after a yes, runs a fake tool for one round, and says "the server is away" when the fake watcher is `down` and the `gemini` fake has no model.
 
 ## 12. The evaluation
 
@@ -291,6 +294,8 @@ Implements the autobot — GPU inference server spec (`docs/specs/active/autobot
 7. **The server's tests run in `make test` on the NUC**, because `make setup` installs `server/` without its `gpu` extra and the tests use fakes; this is how IS-12's "no GPU, no model, no network" is kept honest.
 8. **Streamed speech is cut at sentence ends** (`.`, `?`, `!` followed by space or end), one `Speaker` per sentence.
 9. **No tool ships.** IS-21's mechanism is built and tested with a fake; the first real tool is a later definition change.
+10. **Tier 2's model is `all-MiniLM-L6-v2`, int8 ONNX.** About 23 MB, run under `onnxruntime`, which is already a dependency; the `tokenizers` package is the one new NUC dependency, and the model and tokenizer load from a local path only.
+11. **The core agent's follow-up wait is its own setting.** `[server] core_listen_seconds`, default 10, so it can be tuned apart from the router's `LISTEN_SECONDS`.
 
 ## 14. Out of scope
 
@@ -316,5 +321,4 @@ Text-to-speech on the server (`/v1/tts` is reserved only); an audio-native model
 
 ## Open Questions
 
-- **Tier 2's embedding model.** Which small sentence-embedding model runs on the NUC's CPU, and may it bring a tokenizer dependency? Recommended: `all-MiniLM-L6-v2` as an int8 ONNX file with the `tokenizers` package, because it is about 23 MB, embeds a short phrase in milliseconds on the i7, and runs under `onnxruntime`, which is already a dependency.
-- **How long the core agent waits for the next turn.** After a spoken reply, how long does the session stay open for the owner's next sentence before it ends? Recommended: `LISTEN_SECONDS` (10 s), the router's own wait for a command, because one number for "autobot is listening" is easier to learn than two.
+None.

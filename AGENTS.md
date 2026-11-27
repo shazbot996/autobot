@@ -20,6 +20,8 @@ The code is one Python package, `autobot`, under `src/`: the listener in `src/au
 
 ## What to run before reporting
 
+If you are not running inside cr2, read `.agents/skills/cr2-conformance/SKILL.md` before you write any file in this repository, and run `node .agents/skills/cr2-conformance/scripts/check.mjs` before you report.
+
 Run all three checks, and report only when all three pass:
 
 - `make test` runs the tests with `pytest`.

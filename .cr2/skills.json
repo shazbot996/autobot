@@ -1,0 +1,9 @@
+{
+  "$schema": "https://cr2.dev/schemas/skills-manifest.v1.json",
+  "skills": [
+    {
+      "id": "cr2-conformance",
+      "source": "local"
+    }
+  ]
+}

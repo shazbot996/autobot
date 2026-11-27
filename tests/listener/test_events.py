@@ -15,6 +15,7 @@ from autobot.listener.events import (
     AlreadyRunningError,
     EventPublisher,
     ScoreEvent,
+    TranscriptEvent,
     to_json_line,
 )
 
@@ -39,6 +40,19 @@ EXPECTED_SCORE = {
     "phrase": "autobot",
     "kind": "openwakeword",
     "score": 0.912,
+    "stretch": 7,
+    "at": "2026-11-25T21:30:00.500+00:00",
+}
+
+
+TRANSCRIPT = TranscriptEvent(
+    phrase="autobot", kind="text_match", text="Hey autobot.", stretch=7, at=FIXED_TIME
+)
+EXPECTED_TRANSCRIPT = {
+    "event": "transcript",
+    "phrase": "autobot",
+    "kind": "text_match",
+    "text": "Hey autobot.",
     "stretch": 7,
     "at": "2026-11-25T21:30:00.500+00:00",
 }
@@ -72,6 +86,21 @@ def test_the_json_line_of_a_score_event_carries_its_stretch() -> None:
     ]
 
 
+def test_the_json_line_of_a_transcript_event_carries_its_text_and_stretch() -> None:
+    line = to_json_line(TRANSCRIPT)
+    assert "\n" not in line
+    assert json.loads(line) == EXPECTED_TRANSCRIPT
+    # The field order is part of the documented line.
+    assert list(json.loads(line)) == [
+        "event",
+        "phrase",
+        "kind",
+        "text",
+        "stretch",
+        "at",
+    ]
+
+
 def test_a_detector_with_no_score_for_the_stretch_gives_null() -> None:
     silent = ScoreEvent("autobot", "text_match", None, 3, FIXED_TIME)
     assert json.loads(to_json_line(silent)) == {
@@ -92,6 +121,27 @@ def test_a_score_event_goes_to_the_socket_and_not_to_the_log(tmp_path: Path) -> 
             publisher.publish(SCORE)
             publisher.publish(EVENT)
             with reader.makefile() as stream:
+                assert json.loads(stream.readline()) == EXPECTED_SCORE
+                assert json.loads(stream.readline()) == EXPECTED
+        finally:
+            reader.close()
+    # Only the wake reached the log.
+    assert [json.loads(line) for line in log.getvalue().splitlines()] == [EXPECTED]
+
+
+def test_a_transcript_event_goes_to_the_socket_and_not_to_the_log(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "listener.sock"
+    log = io.StringIO()
+    with EventPublisher(path, log) as publisher:
+        reader = connect(path)
+        try:
+            publisher.publish(TRANSCRIPT)
+            publisher.publish(SCORE)
+            publisher.publish(EVENT)
+            with reader.makefile() as stream:
+                assert json.loads(stream.readline()) == EXPECTED_TRANSCRIPT
                 assert json.loads(stream.readline()) == EXPECTED_SCORE
                 assert json.loads(stream.readline()) == EXPECTED
         finally:

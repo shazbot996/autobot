@@ -4,6 +4,20 @@ type: plan
 title: The face and the echo
 authority: prescriptive
 status: active
+steps:
+  total: 9
+  completed: [1, 2, 3, 4, 5, 6, 7, 8, 9]
+  current: 10
+  status:
+    1: { state: "completed", run: "schiele/0054", at: "2026-11-27T05:18:00.129Z" }
+    2: { state: "completed", run: "schiele/0056", at: "2026-11-27T05:21:46.211Z" }
+    3: { state: "completed", run: "schiele/0058", at: "2026-11-27T05:25:07.556Z" }
+    4: { state: "completed", run: "schiele/0060", at: "2026-11-27T05:28:18.721Z" }
+    5: { state: "completed", run: "schiele/0062", at: "2026-11-27T05:32:28.271Z" }
+    6: { state: "completed", run: "schiele/0064", at: "2026-11-27T05:38:55.698Z" }
+    7: { state: "completed", run: "schiele/0066", at: "2026-11-27T05:43:32.195Z" }
+    8: { state: "completed", run: "schiele/0068", at: "2026-11-27T05:48:56.791Z" }
+    9: { state: "completed", run: "schiele/0070", at: "2026-11-27T05:53:12.423Z" }
 describes:
   - src/autobot/listener/events.py
   - src/autobot/listener/service.py

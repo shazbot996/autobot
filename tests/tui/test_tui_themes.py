@@ -73,6 +73,23 @@ def test_the_themes_differ_where_it_shows() -> None:
         assert not light[role].bold, role
 
 
+def test_every_palette_colours_the_wake_pop_bold_red_on_its_page() -> None:
+    for name, palette in PALETTES.items():
+        wake = palette.inks["wake"]
+        page = palette.inks["normal"].background
+        assert wake == Ink(curses.COLOR_RED, page, True), name
+        # The pair is one the palette already had.
+        others = {
+            (ink.foreground, ink.background)
+            for role, ink in palette.inks.items()
+            if role != "wake"
+        }
+        assert (wake.foreground, wake.background) in others, name
+    # So the terminal needs no more colour pairs than before.
+    assert PAIRS_NEEDED == 14
+    assert Theme.mono().wake == curses.A_REVERSE | curses.A_BOLD
+
+
 def test_from_palette_numbers_the_pairs_and_sets_bold() -> None:
     initialised: list[tuple[int, int, int]] = []
     theme = Theme.from_palette(

@@ -26,6 +26,7 @@ Defined in `config/autobot.toml`, in TOML, and loaded and validated by `src/auto
 | `[ack]` | `text` | string, default `Yes?` | What the listener says aloud when it hears a wake phrase whose target is `ack`. |
 | `[ack]` | `voice` | string, default `en_US-joe-medium` | The piper-tts voice that says it, the name of a voice file under `models/piper/`. The default is piper's Joe Medium voice (TS-15). |
 | `[tui]` | `theme` | `light` \| `dark` \| `sun`, default `light` | The colour theme of the terminal user interface. The table is optional. Pressing `T` in the interface switches to the next theme and writes it here (TS-13). The valid names are `TUI_THEMES` in `src/autobot/config.py`. |
+| `[[routes]]` | (list) | one or more tables, optional | The agent routing rules, in the order they are tried; see **Rule** below. Without the table, one rule routes `echo` to the echo agent. |
 
 ### Wake phrase configuration
 
@@ -145,7 +146,14 @@ The interface does not trust these stored figures for a comparison: the Candidat
 
 ### Rule
 
-Not yet defined. A classic, non-AI matching and validation step applied to a transcript before any AI call. Shared by the rules layer (which evaluates it) and the agent host (which receives what it routes). The intake says rules validate queries, decide which kind of AI call to feed, may answer locally with low latency, and accumulate into conversational pathways.
+A classic, non-AI matching and validation step applied to a transcript before any AI call. Its first form is the agent routing rule: one `[[routes]]` table in `config/autobot.toml`, loaded as `RouteConfig` in `src/autobot/config.py` and evaluated by `src/autobot/routing.py`. The wake phrase only wakes autobot; the face then tries each transcript the listener publishes for `10` seconds against the rules, beginning with the words after the wake phrase in the transcript that woke it. A rule matches when its `command` stands in the transcript among any other words, by the listener's containment rule, and the first rule in the file that matches routes the command to its `agent`. No command is equal to another, compared without regard to case. The Agent routing screen of the interface lists the rules, edits a rule's command and tries a typed sentence against them.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `command` | string, required | The word or words to listen for after the wake phrase. |
+| `agent` | `echo`, required | The agent the command is routed to. The valid names are `ROUTE_AGENTS` in `src/autobot/config.py`; `echo` is the only one built. |
+
+The general shape the intake asks for is wider and not yet defined. It is shared by the rules layer (which evaluates it) and the agent host (which receives what it routes). The intake says rules validate queries, decide which kind of AI call to feed, may answer locally with low latency, and accumulate into conversational pathways.
 
 | Field | Type | Meaning |
 |---|---|---|

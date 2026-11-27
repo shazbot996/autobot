@@ -7,10 +7,12 @@ import pytest
 
 from autobot.config import (
     CONFIG_ENV_VAR,
+    DEFAULT_ROUTES,
     KIND_TEXT_MATCH,
     TUI_THEMES,
     Config,
     ConfigError,
+    RouteConfig,
     TuiConfig,
     config_path,
     load_config,
@@ -273,3 +275,69 @@ def test_duplicate_wake_phrases_are_rejected() -> None:
     )
     with pytest.raises(ConfigError, match="configured more than once"):
         parse_config(data)
+
+
+# --- agent routing ------------------------------------------------------------
+
+
+def with_routes(*routes: object) -> dict[str, Any]:
+    return {**valid_data(), "routes": list(routes)}
+
+
+def test_without_routes_echo_routes_to_the_echo_agent() -> None:
+    config = parse_config(valid_data())
+    assert config.routes == DEFAULT_ROUTES == (RouteConfig("echo", "echo"),)
+
+
+def test_routes_are_read_in_the_order_they_are_tried() -> None:
+    config = parse_config(
+        with_routes(
+            {"command": " say it again ", "agent": "echo"},
+            {"command": "echo", "agent": "echo"},
+        )
+    )
+    assert config.routes == (
+        RouteConfig("say it again", "echo"),
+        RouteConfig("echo", "echo"),
+    )
+
+
+def test_the_committed_config_routes_echo_to_the_echo_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(CONFIG_ENV_VAR, raising=False)
+    assert load_config().routes == (RouteConfig("echo", "echo"),)
+
+
+@pytest.mark.parametrize(
+    ("data", "message"),
+    [
+        (with_routes(), r"\[\[routes\]\] must be one or more tables"),
+        ({**valid_data(), "routes": "echo"}, r"must be one or more tables"),
+        (with_routes("echo"), r"\[\[routes\]\] entry #1 must be a table"),
+        (with_routes({"agent": "echo"}), r"\[routes #1\] missing key: command"),
+        (
+            with_routes({"command": " ", "agent": "echo"}),
+            r"\[routes #1\] command must not be empty",
+        ),
+        (
+            with_routes({"command": "list", "agent": "lists"}),
+            r"\[routes #1\] agent = 'lists' is not one of: echo",
+        ),
+        (
+            with_routes({"command": "echo", "agent": "echo", "word": "x"}),
+            r"\[routes #1\] unknown key: word",
+        ),
+        (
+            with_routes(
+                {"command": "echo", "agent": "echo"},
+                {"command": "Echo", "agent": "echo"},
+            ),
+            r"command 'echo' is configured more than once",
+        ),
+    ],
+)
+def test_invalid_routes_are_rejected(data: dict[str, Any], message: str) -> None:
+    with pytest.raises(ConfigError, match=message) as raised:
+        parse_config(data)
+    assert "\n" not in str(raised.value)

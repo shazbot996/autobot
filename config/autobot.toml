@@ -53,6 +53,16 @@ model = ""
 threshold = 0.5
 target = "ack"
 
+# Agent routing. The wake phrase only wakes autobot; the face then listens
+# for a command and hands it to an agent. A rule matches when its command
+# stands anywhere in what is said, among other words ("autobot, echo that
+# back" runs the echo). Rules are tried in this order, and the first that
+# matches wins. A command is heard only through a "text_match" wake phrase's
+# transcripts. The agents built: "echo". The Agent routing screen edits these.
+[[routes]]
+command = "echo"
+agent = "echo"
+
 [ack]
 text = "Yes?"
 # A piper-tts voice name. Synthesis is local (CONSTRAINTS.md CN-2).

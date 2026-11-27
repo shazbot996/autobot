@@ -80,7 +80,7 @@ from autobot.wakeword.script import Prompt
 
 # The main menu's entries, by the digit that chooses them.
 SESSION, TRAIN, CANDIDATE, MONITOR, DATASET = "1", "2", "3", "4", "5"
-AUDIO, WAKE, SERVICE, HOST, QUIT = "6", "7", "8", "9", "0"
+AUDIO, WAKE, SERVICE, HOST, FACE = "6", "7", "8", "9", "0"
 
 
 def config(harness: Harness) -> dict[str, object]:
@@ -150,12 +150,14 @@ def test_every_screen_opens_and_the_interface_quits(tmp_path: Path) -> None:
 def test_the_menu_moves_with_the_arrows_and_quit_is_an_entry(tmp_path: Path) -> None:
     harness = make_harness(tmp_path, [UP, ENTER])
     assert harness.run() == 0
-    # The tenth entry answers to 0.
-    assert harness.screen.saw("► 0  Quit")
+    # Quit is the twelfth entry, after Agent routing: it has no number.
+    assert harness.screen.saw("►    Quit")
 
 
 def test_zero_chooses_the_tenth_entry(tmp_path: Path) -> None:
-    assert make_harness(tmp_path, ["0"]).run() == 0
+    harness = make_harness(tmp_path, [FACE, -1, F10])
+    assert harness.run() == 0
+    assert harness.screen.saw("═ Face ")
 
 
 def test_f10_quits_from_inside_a_screen_and_closes_the_stream(tmp_path: Path) -> None:
@@ -922,7 +924,9 @@ def test_the_main_menu_lists_the_studio_first(tmp_path: Path) -> None:
         "7  Wake phrase",
         "8  Service",
         "9  Host",
-        "0  Quit",
+        "0  Face",
+        "   Agent routing",
+        "   Quit",
     ]
     positions = [frame.index(label) for label in labels]
     assert positions == sorted(positions)

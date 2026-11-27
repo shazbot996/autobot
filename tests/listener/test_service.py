@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import io
+import json
 import os
 import signal
 import socket
@@ -10,18 +12,23 @@ import wave
 from pathlib import Path
 
 import numpy as np
+import numpy.typing as npt
 import pytest
 
 from autobot.config import CONFIG_ENV_VAR, AckConfig, resolve_repo_path
 from autobot.listener import ack, control, service
 from autobot.listener.audio import WrongHostError, require_nuc
 from autobot.listener.detector import Frame, WakeEvent
-from autobot.listener.events import ScoreEvent
+from autobot.listener.engines.text_match import TextMatchDetector, Transcript
+from autobot.listener.events import Event, EventPublisher, ScoreEvent, TranscriptEvent
 from autobot.listener.models import ModelMissingError
 from autobot.listener.service import (
+    ACK_TAIL_SECONDS,
+    Hold,
     Pipeline,
     RecentAudio,
     SnapshotError,
+    answer_hold_request,
     answer_snapshot_request,
     step,
     write_snapshot,
@@ -259,11 +266,9 @@ def numbered(count: int, start: int = 0) -> list[Frame]:
     ]
 
 
-def drive(
-    pipeline: Pipeline, recent: RecentAudio, frames: list[Frame]
-) -> list[WakeEvent | ScoreEvent]:
+def drive(pipeline: Pipeline, recent: RecentAudio, frames: list[Frame]) -> list[Event]:
     """Run frames through `step` with a fake publisher; return what it was given."""
-    published: list[WakeEvent | ScoreEvent] = []
+    published: list[Event] = []
     for frame in frames:
         step(pipeline, recent, frame, published.append)
     return published
@@ -450,6 +455,112 @@ def test_an_openwakeword_wake_follows_its_stretchs_score_event(
     assert [event.stretch for event in later if isinstance(event, ScoreEvent)] == list(
         range(2, 2 + len(later))
     )
+
+
+# --- transcripts (face plan step 1) ------------------------------------------
+
+
+class ScriptedTranscriber:
+    """A `Transcriber` that hears the same text every time; loads no model."""
+
+    def __init__(self, text: str, score: float = 0.9):
+        self.text = text
+        self.score = score
+
+    def transcribe(self, samples: npt.NDArray[np.float32], hint: str) -> Transcript:
+        return Transcript(text=self.text, score=self.score)
+
+
+def text_match_with(text: str, threshold: float = 0.5) -> TextMatchDetector:
+    return TextMatchDetector(
+        "autobot",
+        "ack",
+        ScriptedTranscriber(text),
+        threshold=threshold,
+        clock=lambda: FIXED_TIME,
+    )
+
+
+def test_a_transcript_is_published_before_its_stretchs_score_and_wake(
+    tmp_path: Path,
+) -> None:
+    scores = one_stretch(speech=4) * 2
+    pipeline = Pipeline(
+        SpeechGate(ScriptedVad(scores)),
+        [text_match_with("hey autobot")],
+        [("autobot", "text_match")],
+    )
+    recent = RecentAudio(clock=lambda: FIXED_TIME)
+    path = tmp_path / "listener.sock"
+    log = io.StringIO()
+    with EventPublisher(path, log) as publisher:
+        reader = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        reader.settimeout(2.0)
+        reader.connect(str(path))
+        try:
+            for frame in numbered(len(scores)):
+                step(pipeline, recent, frame, publisher.publish)
+            with reader.makefile() as stream:
+                lines = [json.loads(stream.readline()) for _ in range(6)]
+        finally:
+            reader.close()
+    # Per stretch: the transcript, then the score, then the wake, one identifier.
+    for stretch, (transcript, score, wake) in enumerate(
+        (lines[:3], lines[3:]), start=1
+    ):
+        assert transcript == {
+            "event": "transcript",
+            "phrase": "autobot",
+            "kind": "text_match",
+            "text": "hey autobot",
+            "stretch": stretch,
+            "at": "2026-11-25T21:30:00.500+00:00",
+        }
+        assert (score["event"], score["stretch"], score["score"]) == (
+            "score",
+            stretch,
+            0.9,
+        )
+        assert (wake["event"], wake["phrase"], wake["kind"]) == (
+            "wake",
+            "autobot",
+            "text_match",
+        )
+    # The log holds the wakes and nothing else: no transcript, no score.
+    logged = [json.loads(line) for line in log.getvalue().splitlines()]
+    assert [line["event"] for line in logged] == ["wake", "wake"]
+
+
+def test_a_transcript_with_no_text_is_not_published() -> None:
+    scores = one_stretch(speech=4)
+    pipeline = Pipeline(
+        SpeechGate(ScriptedVad(scores)),
+        [text_match_with("  ")],
+        [("autobot", "text_match")],
+    )
+    published = drive(
+        pipeline, RecentAudio(clock=lambda: FIXED_TIME), numbered(len(scores))
+    )
+    assert published == [ScoreEvent("autobot", "text_match", 0.9, 1, FIXED_TIME)]
+
+
+def test_a_transcript_after_an_early_score_keeps_the_stretchs_identifier() -> None:
+    # Speech long enough to fill the two-second buffer twice: the first
+    # transcription fires, scores the stretch early, and the refractory period
+    # passes before the stretch ends, so its end is transcribed again.
+    scores = [0.0] * 5 + [1.0] * 60 + [0.0] * 8
+    detector = text_match_with("hey autobot")
+    pipeline = Pipeline(
+        SpeechGate(ScriptedVad(scores)), [detector], [("autobot", "text_match")]
+    )
+    recent = RecentAudio(clock=lambda: FIXED_TIME)
+    published = drive(pipeline, recent, numbered(len(scores)))
+    transcripts = [event for event in published if isinstance(event, TranscriptEvent)]
+    assert len(transcripts) >= 2
+    assert {event.stretch for event in transcripts} == {1}
+    assert isinstance(published[0], TranscriptEvent)
+    assert recent.identifiers() == [1]
+    assert recent.open_identifier() == 2
 
 
 def filled(stretches: int, stretch_frames: int = 20) -> RecentAudio:
@@ -656,3 +767,101 @@ def test_snapshot_gives_up_when_the_listener_does_not_answer(
         "the listener did not write run/snapshot.wav within 0.2 s\n"
     )
     assert not (tmp_path / "run" / "snapshot.request").exists()
+
+
+# --- the hold (face plan step 2) ---------------------------------------------
+
+
+class FakeClock:
+    """A monotonic clock that moves only when told to."""
+
+    def __init__(self) -> None:
+        self.now = 100.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def test_a_hold_lasts_its_seconds_and_the_acknowledgements_tail() -> None:
+    assert ACK_TAIL_SECONDS == 0.25
+    clock = FakeClock()
+    hold = Hold(clock)
+    assert not hold.active
+    assert not hold.ended()
+    hold.extend(2.0)
+    assert hold.active
+    clock.now += 2.24
+    assert hold.active
+    assert not hold.ended()
+    clock.now += 0.02
+    assert not hold.active
+    # The end is seen once: that is when the listener resets.
+    assert hold.ended()
+    assert not hold.ended()
+
+
+def test_a_new_hold_extends_and_never_shortens() -> None:
+    clock = FakeClock()
+    hold = Hold(clock)
+    hold.extend(5.0)
+    clock.now += 1.0
+    hold.extend(1.0)
+    clock.now += 3.0
+    assert hold.active
+    hold.extend(4.0)
+    clock.now += 4.2
+    assert hold.active
+    clock.now += 0.1
+    assert not hold.active
+    assert hold.ended()
+
+
+def test_a_hold_request_is_taken_and_its_file_removed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    clock = FakeClock()
+    hold = Hold(clock)
+    request = service.hold_path(tmp_path)
+    request.write_text("2.4\n")
+    answer_hold_request(hold, tmp_path)
+    assert hold.active
+    assert not request.exists()
+    assert "listener: hold: 2.4 s" in capsys.readouterr().out
+    clock.now += 2.4 + ACK_TAIL_SECONDS
+    assert not hold.active
+
+
+@pytest.mark.parametrize("text", ["", "soon", "0", "-1", "60.5", "nan", "inf"])
+def test_a_bad_hold_request_leaves_no_hold_and_removes_the_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], text: str
+) -> None:
+    hold = Hold(FakeClock())
+    request = service.hold_path(tmp_path)
+    request.write_text(text + "\n")
+    answer_hold_request(hold, tmp_path)
+    assert not hold.active
+    assert not hold.ended()
+    assert not request.exists()
+    out = capsys.readouterr().out
+    assert "listener: hold refused: bad hold request" in out
+    assert len(out.splitlines()) == 1
+
+
+def test_a_hold_signal_with_no_request_leaves_no_hold(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    hold = Hold(FakeClock())
+    answer_hold_request(hold, tmp_path)
+    assert not hold.active
+    assert "hold refused: no hold request was found" in capsys.readouterr().out
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_the_hold_files_are_cleared(tmp_path: Path) -> None:
+    request = service.hold_path(tmp_path)
+    request.write_text("1\n")
+    request.with_name(request.name + ".tmp").write_text("1\n")
+    with service.hold_files_cleared(tmp_path):
+        assert list(tmp_path.iterdir()) == []
+        request.write_text("1\n")
+    assert list(tmp_path.iterdir()) == []

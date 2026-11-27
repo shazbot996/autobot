@@ -36,6 +36,12 @@ acknowledgement is spoken ends its stretch there: the audio captured while
 the listener speaks is dropped, and speech that goes on afterwards is a new
 stretch.
 
+**Transcripts.** Each transcription a detector makes (a `text_match`
+detector's `last_transcript`) is published as a `TranscriptEvent` on the
+socket, stamped with the identifier of the stretch it belongs to, in the
+frame it is made and before that frame's score and wake events. It never
+reaches the log; only the debug switch above logs what was heard.
+
 **What is kept in memory, and the snapshot.** For the live monitor (studio
 spec rule TS-9) `RecentAudio` keeps the audio of the last five scored
 stretches, each with its pre-roll (at most the last `MAX_STRETCH_SECONDS` of
@@ -56,6 +62,28 @@ snapshot` asks for one of them:
 
 The three `run/snapshot.*` files are removed when the listener starts and
 when it stops.
+
+**The hold.** Another process that is about to play sound (the face, before
+it speaks or plays a recording back) can make the listener stop listening
+for a while, so it does not hear that sound as speech.
+`python -m autobot.listener.control hold --seconds S` asks for it:
+
+1. It writes `run/hold.request`, holding S (more than 0, at most
+   `MAX_HOLD_SECONDS`), and sends the listener `SIGUSR2`.
+2. The signal only sets a flag. Before the next frame the main loop reads S,
+   holds until S + `ACK_TAIL_SECONDS` from now, logs "hold: S s", and removes
+   the request file. An unreadable or out-of-range request is logged as
+   "hold refused" and leaves no hold. A new request extends the hold and
+   never shortens it.
+3. While the hold lasts, frames are read and dropped: nothing is scored or
+   published. When it ends, the listener does what it does after its own
+   acknowledgement: it discards what the microphone queued, resets the
+   pipeline, and ends the open stretch.
+
+The listener plays its own acknowledgement before it looks at the next
+request, so a hold asked for just after a wake starts once that has been
+spoken. `run/hold.request` is removed when the listener starts and when it
+stops.
 """
 
 from __future__ import annotations
@@ -91,8 +119,10 @@ from autobot.listener.detector import (
 from autobot.listener.events import (
     SOCKET_PATH,
     AlreadyRunningError,
+    Event,
     EventPublisher,
     ScoreEvent,
+    TranscriptEvent,
 )
 from autobot.listener.models import ModelMissingError, enforce_offline
 from autobot.listener.vad import SileroVad, SpeechGate, VadError
@@ -128,6 +158,12 @@ SNAPSHOT_ERROR = Path("run/snapshot.error")
 SNAPSHOT_BUFFER = "buffer"
 SNAPSHOT_SAMPLE_WIDTH = 2
 
+# The hold hand-off with `autobot.listener.control hold`.
+HOLD_REQUEST = Path("run/hold.request")
+# The longest hold one request may ask for: a faulty request must not leave
+# the listener deaf for long.
+MAX_HOLD_SECONDS = 60.0
+
 
 def log(message: str) -> None:
     """One timestamped line on stdout, which is the listener's log."""
@@ -150,7 +186,9 @@ class Pipeline:
     gate of its own. After each `process`, `stretch_frames` holds the frames
     that gate released for the microphone frame, `stretch_ended` says whether
     the frame ended its stretch, and `stretch_scores` gives each detector's
-    score for the stretch.
+    score for the stretch. `transcripts` holds the `(phrase, kind, text)` of
+    each transcription a detector made during the frame, in the order they
+    were made; a transcription with no text is left out.
 
     `names` is the `(phrase, kind)` of each detector, in order, for the score
     events; without it the detectors' own `phrase` and `kind` attributes are
@@ -202,6 +240,17 @@ class Pipeline:
         self.stretch_frames: tuple[Frame, ...] = ()
         self.stretch_ended = False
         self._stretch_open = False
+        self.transcripts: list[tuple[str, str, str]] = []
+        # Per detector (by `id`): its name, and the transcript it held when
+        # last checked, so that a new transcription is seen once.
+        self._names_by_id = {
+            id(detector): name
+            for detector, name in zip(self.detectors, self.names, strict=True)
+        }
+        self._transcripts_seen: dict[int, object] = {
+            id(detector): getattr(detector, "last_transcript", None)
+            for detector in self.detectors
+        }
         # Per detector (by `id`), for the open stretch: the transcript it held
         # when the stretch opened, whether its own gate has ended since, and
         # the score it first fired at.
@@ -217,6 +266,7 @@ class Pipeline:
         """Take one microphone frame; return the wake events it completed."""
         probability = self._source.probability(frame)
         self.frames += 1
+        self.transcripts = []
         # Every gate first: the stretch's bookkeeping must be in place before
         # a detector hears the frame.
         results = [gate.push_scored(frame, probability) for gate, _ in self._routes]
@@ -247,12 +297,14 @@ class Pipeline:
             for voiced in result.frames:
                 for detector in detectors:
                     event = detector.feed(voiced)
+                    self._note_transcript(detector)
                     if event is not None:
                         events.append(event)
                         self._fired.setdefault(id(detector), event.score)
             if result.speech_ended:
                 for detector in detectors:
                     event = detector.end_of_speech()
+                    self._note_transcript(detector)
                     self._ended.add(id(detector))
                     if event is not None:
                         events.append(event)
@@ -260,6 +312,18 @@ class Pipeline:
         if stretch.speech_ended:
             self._stretch_open = False
         return events
+
+    def _note_transcript(self, detector: Detector) -> None:
+        """Record the detector's transcription, if it made one since last checked."""
+        key = id(detector)
+        transcript = getattr(detector, "last_transcript", None)
+        if transcript is None or transcript is self._transcripts_seen.get(key):
+            return
+        self._transcripts_seen[key] = transcript
+        text = str(getattr(transcript, "text", ""))
+        if text.strip():
+            phrase, kind = self._names_by_id[key]
+            self.transcripts.append((phrase, kind, text))
 
     def stretch_scores(self) -> list[float | None]:
         """Each detector's score for the stretch open now, or the one that last ended.
@@ -301,6 +365,7 @@ class Pipeline:
         self.stretch_frames = ()
         self.stretch_ended = False
         self._stretch_open = False
+        self.transcripts = []
 
 
 def build_pipeline(config: Config) -> Pipeline:
@@ -389,6 +454,30 @@ class RecentAudio:
             self._open = None
         return scores
 
+    def open_identifier(self) -> int:
+        """The identifier of the stretch open now, or of the next one to open.
+
+        That is the identifier the stretch has once scored, or will be given
+        when it is scored. Ask before `observe` takes the frame in.
+        """
+        if self._open is not None and self._scored:
+            return self.next_identifier - 1
+        return self.next_identifier
+
+    def transcript_events(self, pipeline: Pipeline) -> list[TranscriptEvent]:
+        """The transcriptions `pipeline.process` just made, as events.
+
+        Stamped with `open_identifier()`: call it before `observe`.
+        """
+        if not pipeline.transcripts:
+            return []
+        identifier = self.open_identifier()
+        at = self._clock()
+        return [
+            TranscriptEvent(phrase, kind, text, identifier, at)
+            for phrase, kind, text in pipeline.transcripts
+        ]
+
     def reset(self) -> None:
         """Audio was dropped: the open stretch ends here. What is held stays."""
         self._open = None
@@ -409,7 +498,7 @@ class RecentAudio:
         return np.concatenate(list(self.buffer)) if self.buffer else None
 
 
-type Publish = Callable[[WakeEvent | ScoreEvent], object]
+type Publish = Callable[[Event], object]
 
 
 def step(
@@ -417,10 +506,12 @@ def step(
 ) -> list[WakeEvent]:
     """One microphone frame through the pipeline, with its events published.
 
-    A stretch's score events are published before the wake events of the same
-    frame. Returns the wake events.
+    The frame's transcript events are published first, then a stretch's score
+    events, then the wake events of the same frame. Returns the wake events.
     """
     events = pipeline.process(frame)
+    for transcript in recent.transcript_events(pipeline):
+        publish(transcript)
     for score in recent.observe(pipeline, frame, events):
         publish(score)
     for event in events:
@@ -536,16 +627,114 @@ def answer_snapshot_request(
         request_path.unlink()
 
 
+class Hold:
+    """Until when the listener drops its audio, at another process's request.
+
+    `extend(S)` holds until S + `ACK_TAIL_SECONDS` from now, or later if a
+    hold already runs that long. `active` says whether the hold runs now;
+    `ended()` is true once, at the first call after a hold has run out.
+    """
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic):
+        self._clock = clock
+        self._until: float | None = None
+
+    def extend(self, seconds: float) -> None:
+        until = self._clock() + seconds + ACK_TAIL_SECONDS
+        if self._until is None or until > self._until:
+            self._until = until
+
+    @property
+    def active(self) -> bool:
+        return self._until is not None and self._clock() < self._until
+
+    def ended(self) -> bool:
+        if self._until is None or self._clock() < self._until:
+            return False
+        self._until = None
+        return True
+
+
+class HoldError(Exception):
+    """A hold request cannot be taken. The message is one line."""
+
+
+def parse_hold_seconds(text: str) -> float:
+    """The seconds a hold request asks for: more than 0, at most the cap."""
+    wanted = text.strip()
+    try:
+        seconds = float(wanted)
+    except ValueError:
+        raise HoldError(
+            f"bad hold request {wanted[:40]!r}: expected a number of seconds"
+        ) from None
+    if not 0.0 < seconds <= MAX_HOLD_SECONDS:
+        raise HoldError(
+            f"bad hold request {wanted[:40]!r}: "
+            f"expected more than 0 and at most {MAX_HOLD_SECONDS:g} seconds"
+        )
+    return seconds
+
+
+def hold_path(run_dir: Path) -> Path:
+    """The request file of the hold hand-off in `run_dir`."""
+    return run_dir / HOLD_REQUEST.name
+
+
+def clear_hold_files(run_dir: Path) -> None:
+    """Remove what a hold hand-off left in `run_dir`."""
+    path = hold_path(run_dir)
+    for leftover in (path, path.with_name(path.name + ".tmp")):
+        with contextlib.suppress(OSError):
+            leftover.unlink()
+
+
+@contextlib.contextmanager
+def hold_files_cleared(run_dir: Path) -> Iterator[None]:
+    """Clear the hold files on the way in and on the way out."""
+    clear_hold_files(run_dir)
+    try:
+        yield
+    finally:
+        clear_hold_files(run_dir)
+
+
+def answer_hold_request(hold: Hold, run_dir: Path) -> None:
+    """Take the hold `hold.request` in `run_dir` asks for, and remove the file.
+
+    Never raises: a request that cannot be taken leaves no hold and is logged.
+    """
+    request_path = hold_path(run_dir)
+    try:
+        try:
+            request = request_path.read_text(errors="replace")
+        except OSError:
+            raise HoldError("no hold request was found") from None
+        seconds = parse_hold_seconds(request)
+    except HoldError as error:
+        log(f"hold refused: {error}")
+    else:
+        hold.extend(seconds)
+        log(f"hold: {seconds:g} s")
+    with contextlib.suppress(OSError):
+        request_path.unlink()
+
+
 def run(
-    config: Config, stop: threading.Event, snapshot: threading.Event | None = None
+    config: Config,
+    stop: threading.Event,
+    snapshot: threading.Event | None = None,
+    hold_request: threading.Event | None = None,
 ) -> None:
     """Run until `stop` is set. Opens the microphone, the speaker and the socket.
 
-    `snapshot` is set, by `SIGUSR1`, when a snapshot request is waiting.
+    `snapshot` is set, by `SIGUSR1`, when a snapshot request is waiting;
+    `hold_request`, by `SIGUSR2`, when a hold request is.
     """
     debug = bool(os.environ.get(DEBUG_ENV_VAR))
     pipeline = build_pipeline(config)
     recent = RecentAudio.for_config(config)
+    hold = Hold()
     run_dir = resolve_repo_path(SNAPSHOT_REQUEST).parent
     needs_ack = any(phrase.target == TARGET_ACK for phrase in config.wake_phrases)
     ack = (
@@ -560,6 +749,7 @@ def run(
         EventPublisher(resolve_repo_path(SOCKET_PATH)) as publisher,
         # We hold the socket by now, so the files are nobody else's.
         snapshot_files_cleared(run_dir),
+        hold_files_cleared(run_dir),
         Microphone(config.audio) as microphone,
     ):
         log(
@@ -574,6 +764,9 @@ def run(
                 # Cleared first: a request signalled meanwhile is not lost.
                 snapshot.clear()
                 answer_snapshot_request(recent, config.audio.sample_rate, run_dir)
+            if hold_request is not None and hold_request.is_set():
+                hold_request.clear()
+                answer_hold_request(hold, run_dir)
             frame = microphone.read(READ_TIMEOUT_SECONDS)
             if frame is None:
                 if time.monotonic() - last_audio > STALLED_SECONDS:
@@ -582,6 +775,15 @@ def run(
                     )
                 continue
             last_audio = time.monotonic()
+            if hold.active:
+                # Held: the frame is dropped, and nothing is scored or published.
+                continue
+            if hold.ended():
+                # What the acknowledgement does once it has been spoken.
+                microphone.discard()
+                pipeline.reset()
+                recent.reset()
+                continue
             events = step(pipeline, recent, frame, publisher.publish)
             if debug:
                 _log_debug(pipeline, was_in_speech)
@@ -639,6 +841,7 @@ def main() -> int:
     enforce_offline()
     stop = threading.Event()
     snapshot = threading.Event()
+    hold_request = threading.Event()
 
     def on_signal(signum: int, frame: FrameType | None) -> None:
         stop.set()
@@ -647,13 +850,18 @@ def main() -> int:
         # Only a flag: the main loop writes the snapshot between two frames.
         snapshot.set()
 
+    def on_hold(signum: int, frame: FrameType | None) -> None:
+        # Only a flag: the main loop takes the hold between two frames.
+        hold_request.set()
+
     signal.signal(signal.SIGTERM, on_signal)
     signal.signal(signal.SIGINT, on_signal)
     signal.signal(signal.SIGUSR1, on_snapshot)
+    signal.signal(signal.SIGUSR2, on_hold)
     try:
         config = load_config()
         require_nuc(config, "the listener")
-        run(config, stop, snapshot)
+        run(config, stop, snapshot, hold_request)
     except (
         AlreadyRunningError,
         ConfigError,

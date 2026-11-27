@@ -7,7 +7,8 @@
     status     show whether it runs, its uptime, CPU and memory
     logs       print the end of the log (`--follow` keeps following it)
     snapshot   have the running listener write audio it holds to run/snapshot.wav
-    install    install the systemd user unit (does not start or enable it)
+    hold       have the running listener stop listening for a few seconds
+    install   install the systemd user unit (does not start or enable it)
     uninstall  stop, disable and remove the unit
     enable     start the unit at boot: enable it and turn lingering on
     disable    stop starting the unit at boot
@@ -47,6 +48,18 @@ listener's own reason, which it hands back in `run/snapshot.error` (the
 stretch is no longer held, nothing has been heard yet), or that nothing came
 within the five seconds. One snapshot at a time: the file is overwritten by
 the next, so read it before asking again.
+
+`hold` is how the face keeps the listener from hearing what it plays:
+
+    hold --seconds S        drop the microphone's audio for S seconds (more
+                            than 0, at most 60), plus the acknowledgement's tail
+
+It works the same in both modes. It writes S to `run/hold.request`, sends the
+listener `SIGUSR2` and waits up to five seconds for the listener to take the
+request, which it does by removing the file. On success it prints `listener
+holding for S s` and exits 0. Otherwise it exits 1 with one line on stderr:
+the listener is not running, or it did not take the hold within the five
+seconds. A hold asked for while one runs extends it and never shortens it.
 """
 
 from __future__ import annotations
@@ -67,9 +80,11 @@ from autobot.config import ConfigError, load_config, repo_root, resolve_repo_pat
 from autobot.listener.audio import AudioError, require_nuc
 from autobot.listener.events import SOCKET_PATH
 from autobot.listener.service import (
+    MAX_HOLD_SECONDS,
     READY_MESSAGE,
     SNAPSHOT_BUFFER,
     SNAPSHOT_FILE,
+    hold_path,
     snapshot_paths,
 )
 
@@ -86,6 +101,7 @@ STOP_TIMEOUT_SECONDS = 10.0
 DEFAULT_LOG_LINES = 40
 DEFAULT_SAMPLE_SECONDS = 1.0
 SNAPSHOT_TIMEOUT_SECONDS = 5.0
+HOLD_TIMEOUT_SECONDS = 5.0
 
 
 class ControlError(Exception):
@@ -522,6 +538,55 @@ def _stretch_identifier(text: str) -> int:
     return identifier
 
 
+def cmd_hold(args: argparse.Namespace) -> int:
+    pid = listener_pid()
+    # No socket yet means it is still starting, and hears nothing yet.
+    if pid is None or not resolve_repo_path(SOCKET_PATH).exists():
+        raise ControlError("the listener is not running")
+    seconds: float = args.seconds
+    request_path = hold_path(resolve_repo_path(RUN_DIR))
+    try:
+        temporary = request_path.with_name(request_path.name + ".tmp")
+        temporary.write_text(f"{seconds}\n")
+        os.replace(temporary, request_path)
+    except OSError as error:
+        raise ControlError(
+            f"cannot write the hold request in {RUN_DIR}: {error.strerror}"
+        ) from None
+    try:
+        os.kill(pid, signal.SIGUSR2)
+    except ProcessLookupError:
+        request_path.unlink(missing_ok=True)
+        raise ControlError("the listener is not running") from None
+    deadline = time.monotonic() + HOLD_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        # The listener removes the request once it has taken the hold.
+        if not request_path.exists():
+            print(f"listener holding for {seconds:g} s")
+            return 0
+        if not is_listener(pid):
+            request_path.unlink(missing_ok=True)
+            raise ControlError("the listener is not running")
+        time.sleep(0.05)
+    request_path.unlink(missing_ok=True)
+    raise ControlError(
+        f"the listener did not take the hold within {HOLD_TIMEOUT_SECONDS:g} s"
+    )
+
+
+def _hold_seconds(text: str) -> float:
+    try:
+        seconds = float(text)
+    except ValueError:
+        seconds = 0.0
+    if not 0.0 < seconds <= MAX_HOLD_SECONDS:
+        raise argparse.ArgumentTypeError(
+            f"{text!r} is not a hold length "
+            f"(seconds, more than 0 and at most {MAX_HOLD_SECONDS:g})"
+        )
+    return seconds
+
+
 def cmd_install(args: argparse.Namespace) -> int:
     require_nuc(load_config(), "the listener service")
     root = repo_root()
@@ -657,6 +722,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="the last ten seconds of microphone audio",
     )
     snapshot.set_defaults(run=cmd_snapshot)
+    hold = commands.add_parser(
+        "hold", help="have the running listener stop listening for a few seconds"
+    )
+    hold.add_argument(
+        "--seconds",
+        type=_hold_seconds,
+        required=True,
+        metavar="S",
+        help=(
+            "how long to drop the microphone's audio, more than 0 and at most "
+            f"{MAX_HOLD_SECONDS:g}; the listener adds the acknowledgement's tail"
+        ),
+    )
+    hold.set_defaults(run=cmd_hold)
     commands.add_parser("install", help="install the systemd user unit").set_defaults(
         run=cmd_install
     )

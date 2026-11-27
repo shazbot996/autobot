@@ -17,6 +17,7 @@ from autobot.tui.runner import (
     SubprocessRunner,
     listener_ack_argv,
     listener_control_argv,
+    listener_hold_argv,
     listener_snapshot_argv,
     module_available,
     run_command,
@@ -212,6 +213,12 @@ def test_the_snapshot_command_names_a_stretch_or_the_buffer() -> None:
     assert listener_snapshot_argv(7) == [*control, "snapshot", "--stretch", "7"]
     assert listener_snapshot_argv(None) == [*control, "snapshot", "--buffer"]
     assert Path("run/snapshot.wav") == SNAPSHOT_FILE
+
+
+def test_the_hold_command_gives_its_seconds_to_two_decimals() -> None:
+    control = [sys.executable, "-m", "autobot.listener.control"]
+    assert listener_hold_argv(2.345678) == [*control, "hold", "--seconds", "2.35"]
+    assert listener_hold_argv(5) == [*control, "hold", "--seconds", "5.00"]
 
 
 def test_a_function_task_runs_on_a_thread_and_keeps_the_value() -> None:

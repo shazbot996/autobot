@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import curses
 import json
+import wave
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -252,6 +253,39 @@ def tone(value: int, samples: int = 1280) -> Samples:
     return np.full(samples, value, dtype=np.int16)
 
 
+# The committed fixtures, read by the fakes; never written by a test.
+FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "audio"
+# The clip the fake voice "says": a committed fixture, so no model is loaded.
+VOICE_FIXTURE = FIXTURES / "hey_autobot.wav"
+
+
+def fixture_clip(path: Path) -> Clip:
+    """A committed fixture WAV as a clip."""
+    with wave.open(str(path), "rb") as wav:
+        frames = wav.readframes(wav.getnframes())
+        return Clip(
+            np.frombuffer(frames, dtype="<i2").astype(np.int16), wav.getframerate()
+        )
+
+
+@dataclass
+class FakeVoice:
+    """`Services.voice` without piper: every line sounds like the fixture.
+
+    `error`, when set, is raised instead, as the real voice raises when its
+    model file is missing.
+    """
+
+    calls: list[tuple[str, str, Path]] = field(default_factory=list)
+    error: Exception | None = None
+
+    def __call__(self, text: str, voice: str, models_root: Path) -> Clip:
+        self.calls.append((text, voice, models_root))
+        if self.error is not None:
+            raise self.error
+        return fixture_clip(VOICE_FIXTURE)
+
+
 class DoneTask:
     def __init__(self, result: CommandResult) -> None:
         self.result = result
@@ -362,6 +396,8 @@ class Harness:
     dataset: VoiceDataset
     # The listener's event stream: a test feeds it.
     events: FakeEvents
+    # autobot's voice: a fixture clip for every line, no model.
+    voice: FakeVoice
 
     def run(self) -> int:
         return self.app.run()
@@ -421,6 +457,7 @@ def make_harness(
     wpctl_calls: list[list[str]] = []
     dataset = VoiceDataset(tmp_path / VOICE_DIR)
     events = FakeEvents()
+    voice = FakeVoice()
 
     def wpctl(argv: Sequence[str]) -> CommandResult:
         wpctl_calls.append(list(argv))
@@ -444,6 +481,7 @@ def make_harness(
         score_real=score_real,
         score_kind=score_kind,
         spawn=lambda function: FunctionTask(function, inline=True),
+        voice=voice,
     )
     if script is not None:
         chosen = list(script)
@@ -464,4 +502,5 @@ def make_harness(
         wpctl_calls,
         dataset,
         events,
+        voice,
     )

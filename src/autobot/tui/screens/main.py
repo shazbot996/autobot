@@ -16,8 +16,10 @@ from autobot.tui.menu import MenuItem
 from autobot.tui.screens.audio import AudioScreen
 from autobot.tui.screens.candidate import CandidateScreen
 from autobot.tui.screens.dataset import DatasetScreen, minutes_text
+from autobot.tui.screens.face import FaceScreen
 from autobot.tui.screens.host import HostScreen
 from autobot.tui.screens.monitor import open_monitor
+from autobot.tui.screens.routing import RoutingScreen
 from autobot.tui.screens.service import ServiceScreen
 from autobot.tui.screens.session import open_session
 from autobot.tui.screens.wake_phrase import TrainScreen, WakePhraseScreen
@@ -149,6 +151,16 @@ class MainMenu(MenuView):
                 "Host",
                 lambda: app.push(HostScreen(app)),
                 "Name this machine as the NUC",
+            ),
+            MenuItem(
+                "Face",
+                lambda: app.push(FaceScreen(app)),
+                'autobot\'s face: wake it, then say a command such as "echo"',
+            ),
+            MenuItem(
+                "Agent routing",
+                lambda: app.push(RoutingScreen(app)),
+                "The rules that hand a command after the wake to an agent",
             ),
             MenuItem("Quit", app.quit, "Leave autobot"),
         ]

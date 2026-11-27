@@ -1,7 +1,7 @@
-"""Publish the listener's events as JSON lines: wakes and stretch scores.
+"""Publish the listener's events as JSON lines: wakes, scores and transcripts.
 
 Every event is one JSON object on one line, UTF-8, ending in a newline. `at`
-is ISO 8601 in UTC with milliseconds. There are two events.
+is ISO 8601 in UTC with milliseconds. There are three events.
 
 **`wake`**: a wake phrase was heard (`WakeEvent`). It goes to the log and to
 the socket. It is the hand-off seam to the routing layer:
@@ -30,11 +30,32 @@ held. The live monitor reads it:
 - `at` is when the line was published: the end of the stretch, or the wake
   that closed its score early (below).
 
-**Order.** A stretch's `score` lines are published before any `wake` it
-causes, so a reader ties a `wake` to the stretch of the `score` lines just
-before it. A stretch is scored once: when it ends, or, when a detector fires
-inside it, at that moment, just before the first `wake` (the `score` of the
-detector that fired is then the score it fired at). See
+**`transcript`**: the text of one transcription a detector made of speech in
+a stretch (`TranscriptEvent`). It goes to the socket only, never to the log,
+like `score`: a transcript of the room is not something to keep. The face's
+ticker reads it:
+
+    {"event": "transcript", "phrase": "autobot", "kind": "text_match", "text": "Hey autobot.", "stretch": 7, "at": "2026-11-26T18:02:11.480+00:00"}
+
+- `phrase` and `kind` are the configured wake phrase and the detector kind
+  whose transcription it is. Only a detector that transcribes speech
+  (`text_match`) yields any; a detector makes one per transcription, so a
+  long stretch can yield several.
+- `text` is what the detector's speech-to-text wrote, as it wrote it. A
+  transcription with no text is not published.
+- `stretch` is the identifier of the stretch the transcribed speech belongs
+  to: the same as its `score` lines.
+- `at` is when the line was published: when the transcription was made.
+
+**Order.** For each stretch: transcripts, then scores, then wakes. A
+stretch's `transcript` lines are published as the transcriptions are made,
+so before its `score` lines; its `score` lines are published before any
+`wake` it causes, so a reader ties a `wake` to the stretch of the `score`
+lines just before it. A stretch is scored once: when it ends, or, when a
+detector fires inside it, at that moment, just before the first `wake` (the
+`score` of the detector that fired is then the score it fired at). A
+transcription made in a stretch after it was scored early is published after
+that stretch's `score` and `wake` lines, with the same `stretch`. See
 `autobot.listener.service` for which audio a stretch is.
 
 Socket semantics (`run/listener.sock`):
@@ -93,8 +114,38 @@ class ScoreEvent:
     at: datetime
 
 
-def to_json_line(event: WakeEvent | ScoreEvent) -> str:
+@dataclass(frozen=True)
+class TranscriptEvent:
+    """The text of one transcription a detector made of speech in a stretch."""
+
+    # The configured phrase whose detector made the transcription.
+    phrase: str
+    # The detector kind that made it.
+    kind: str
+    # What speech-to-text wrote; never empty.
+    text: str
+    # The identifier of the stretch the speech belongs to.
+    stretch: int
+    # When the transcript was published: timezone-aware, UTC.
+    at: datetime
+
+
+type Event = WakeEvent | ScoreEvent | TranscriptEvent
+
+
+def to_json_line(event: Event) -> str:
     """The event as its one JSON line, without the newline."""
+    if isinstance(event, TranscriptEvent):
+        return json.dumps(
+            {
+                "event": "transcript",
+                "phrase": event.phrase,
+                "kind": event.kind,
+                "text": event.text,
+                "stretch": event.stretch,
+                "at": event.at.isoformat(timespec="milliseconds"),
+            }
+        )
     if isinstance(event, ScoreEvent):
         return json.dumps(
             {
@@ -192,10 +243,11 @@ class EventPublisher:
             reader.setblocking(False)
             self._readers.append(reader)
 
-    def publish(self, event: WakeEvent | ScoreEvent) -> str:
+    def publish(self, event: Event) -> str:
         """Write the event's line to every reader; return the line.
 
-        A wake event goes to the log as well. A score event does not.
+        A wake event goes to the log as well. A score or transcript event
+        does not.
         """
         line = to_json_line(event)
         if isinstance(event, WakeEvent):

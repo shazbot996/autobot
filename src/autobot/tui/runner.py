@@ -279,6 +279,11 @@ def listener_snapshot_argv(stretch: int | None) -> list[str]:
     return listener_control_argv("snapshot", "--stretch", str(stretch))
 
 
+def listener_hold_argv(seconds: float) -> list[str]:
+    """`control hold`: the listener drops what it hears for `seconds`."""
+    return listener_control_argv("hold", "--seconds", f"{seconds:.2f}")
+
+
 def listener_status_argv() -> list[str]:
     """`control status` with a short CPU sample: only whether it runs is wanted."""
     return [*listener_control_argv("status"), "--sample", f"{LISTENER_STATUS_SAMPLE:g}"]

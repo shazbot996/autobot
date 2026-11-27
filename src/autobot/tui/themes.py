@@ -87,6 +87,7 @@ LIGHT = Palette(
         "badge_warning": Ink(BLACK, YELLOW),
         "badge_error": Ink(WHITE, RED, True),
         "badge_info": Ink(BLACK, CYAN),
+        "wake": Ink(RED, WHITE, True),
     },
 )
 
@@ -121,6 +122,7 @@ DARK = Palette(
         "badge_warning": Ink(BLACK, YELLOW),
         "badge_error": Ink(WHITE, RED, True),
         "badge_info": Ink(BLACK, CYAN),
+        "wake": Ink(RED, BLUE, True),
     },
 )
 
@@ -156,6 +158,7 @@ SUN = Palette(
         "badge_warning": Ink(BLACK, YELLOW),
         "badge_error": Ink(WHITE, RED, True),
         "badge_info": Ink(BLACK, WHITE),
+        "wake": Ink(RED, BLACK, True),
     },
 )
 

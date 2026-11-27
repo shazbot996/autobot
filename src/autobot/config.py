@@ -32,6 +32,10 @@ WAKE_PHRASE_KINDS = (KIND_TEXT_MATCH, KIND_OPENWAKEWORD, KIND_SHERPA_KWS)
 # The colour themes of the terminal user interface, in the order `T` cycles them.
 TUI_THEMES = ("light", "dark", "sun")
 
+# The agents a routing rule can hand a command to. The echo is the first.
+AGENT_ECHO = "echo"
+ROUTE_AGENTS = (AGENT_ECHO,)
+
 # An audio device: a substring of a device name, or a numeric index.
 type DeviceSpec = str | int
 
@@ -88,12 +92,28 @@ class TuiConfig:
 
 
 @dataclass(frozen=True)
+class RouteConfig:
+    """One routing rule: a command heard after the wake goes to `agent`."""
+
+    # The word or words to find in what is said after the wake phrase.
+    command: str
+    # One of `ROUTE_AGENTS`.
+    agent: str
+
+
+# The rules when the file has no `[[routes]]`: "echo" runs the echo.
+DEFAULT_ROUTES = (RouteConfig(command="echo", agent=AGENT_ECHO),)
+
+
+@dataclass(frozen=True)
 class Config:
     host: HostConfig
     audio: AudioConfig
     wake_phrases: tuple[WakePhraseConfig, ...]
     ack: AckConfig
     tui: TuiConfig = TuiConfig()
+    # The routing rules, in the order they are tried.
+    routes: tuple[RouteConfig, ...] = DEFAULT_ROUTES
     # The file the configuration was loaded from; None when built from a mapping.
     path: Path | None = None
 
@@ -145,7 +165,7 @@ def load_config(path: str | Path | None = None) -> Config:
 
 def parse_config(data: Mapping[str, object], path: Path | None = None) -> Config:
     """Validate parsed TOML and build the `Config`. Messages name the offending key."""
-    _reject_unknown(data, "", ("host", "audio", "wake_phrases", "ack", "tui"))
+    _reject_unknown(data, "", ("host", "audio", "wake_phrases", "ack", "tui", "routes"))
 
     host_table = _table(data, "host", required=False)
     _reject_unknown(host_table, "host", ("nuc_hostname",))
@@ -192,8 +212,42 @@ def parse_config(data: Mapping[str, object], path: Path | None = None) -> Config
         wake_phrases=wake_phrases,
         ack=ack,
         tui=TuiConfig(theme=theme),
+        routes=_routes(data),
         path=path,
     )
+
+
+def _routes(data: Mapping[str, object]) -> tuple[RouteConfig, ...]:
+    """The `[[routes]]` entries; `DEFAULT_ROUTES` when the file has none."""
+    raw = data.get("routes")
+    if raw is None:
+        return DEFAULT_ROUTES
+    if not isinstance(raw, list) or not raw:
+        raise ConfigError("[[routes]] must be one or more tables")
+    entries: list[RouteConfig] = []
+    for number, item in enumerate(raw, start=1):
+        where = f"routes #{number}"
+        if not isinstance(item, dict):
+            raise ConfigError(f"[[routes]] entry #{number} must be a table")
+        _reject_unknown(item, where, ("command", "agent"))
+        agent = _str(item, where, "agent", non_empty=True)
+        if agent not in ROUTE_AGENTS:
+            raise ConfigError(
+                f"[{where}] agent = {agent!r} is not one of: {', '.join(ROUTE_AGENTS)}"
+            )
+        entries.append(
+            RouteConfig(
+                command=_str(item, where, "command", non_empty=True).strip(),
+                agent=agent,
+            )
+        )
+    commands = [" ".join(entry.command.lower().split()) for entry in entries]
+    for command in commands:
+        if commands.count(command) > 1:
+            raise ConfigError(
+                f"[[routes]] command {command!r} is configured more than once"
+            )
+    return tuple(entries)
 
 
 def _wake_phrases(data: Mapping[str, object]) -> tuple[WakePhraseConfig, ...]:

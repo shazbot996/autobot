@@ -46,8 +46,9 @@ from typing import TYPE_CHECKING, Any
 
 from autobot import __version__
 from autobot.config import Config, ConfigError, config_path, repo_root
-from autobot.tui.audio import FIXTURE_DIR, AudioBackend, SoundDeviceBackend
+from autobot.tui.audio import FIXTURE_DIR, AudioBackend, Clip, SoundDeviceBackend
 from autobot.tui.config_edit import Change, ConfigEditError, ConfigStore
+from autobot.tui.face_voice import synthesise
 from autobot.tui.menu import Menu, MenuItem
 from autobot.tui.monitor import SOCKET_PATH, EventSource, EventStream
 from autobot.tui.pipewire import PipeWire
@@ -177,6 +178,9 @@ class Services:
     spawn: Callable[[Callable[[], object]], FunctionTask] = spawn_function
     # The directory the model files are looked for under: `repo` unless given.
     models_root: Path = field(default=None)  # type: ignore[assignment]
+    # autobot's voice: renders (text, piper voice, models root) into a clip,
+    # locally; tests give a fake that loads no model.
+    voice: Callable[[str, str, Path], Clip] = synthesise
 
     def __post_init__(self) -> None:
         if self.dataset is None:

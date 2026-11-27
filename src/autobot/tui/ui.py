@@ -89,6 +89,8 @@ class Theme:
     badge_warning: int
     badge_error: int
     badge_info: int
+    # The wake phrase where it pops on the face's ticker.
+    wake: int
     # The palette's name; empty for the mono theme.
     name: str = ""
 
@@ -126,6 +128,7 @@ class Theme:
             badge_warning=reverse,
             badge_error=reverse | bold,
             badge_info=reverse,
+            wake=reverse | bold,
         )
 
     @classmethod

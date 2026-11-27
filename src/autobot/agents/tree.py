@@ -28,7 +28,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from autobot.agents.registry import AGENTS
-from autobot.config import Config
+from autobot.config import AGENT_CORE, Config
 from autobot.tui.ui import Glyphs, Rect
 
 # The levels of the tree, top-down: the wake phrase, then the agents.
@@ -67,6 +67,9 @@ _UNICODE_TEES = {
     (True, True, True, False): "┤",
 }
 
+# What is written on the default edge, the one into the core agent (IS-19).
+DEFAULT_COMMAND = "(anything else)"
+
 type Cell = tuple[int, int]
 # Writes text into the picture at (row, column).
 type _Putter = Callable[[int, int, str], None]
@@ -103,6 +106,8 @@ class Edge:
     command: str
     mode: str
     node: Node
+    # The edge no rule stands behind: where what no rule takes goes (IS-17).
+    default: bool = False
 
     @property
     def label(self) -> str:
@@ -154,6 +159,19 @@ def build_tree(config: Config) -> Tree:
                 uses_model=agent.uses_model if agent is not None else False,
             )
         edges.append(Edge(route.command, route.mode, node))
+    # The core agent has no rule: it is the default of the level, where what
+    # no rule and no tier takes goes (IS-17, IS-19).
+    core = AGENTS.get(AGENT_CORE)
+    if core is not None and AGENT_CORE not in nodes:
+        defined = [agent for agent in config.agents if agent.name == AGENT_CORE]
+        for definition in defined:
+            node = nodes[AGENT_CORE] = Node(
+                AGENT_CORE,
+                confirm_entry=definition.confirm_entry,
+                confirm_request=definition.confirm_request,
+                uses_model=core.uses_model,
+            )
+            edges.append(Edge(DEFAULT_COMMAND, "", node, default=True))
     return Tree(root, tuple(nodes.values()), tuple(edges), config.words.actions)
 
 

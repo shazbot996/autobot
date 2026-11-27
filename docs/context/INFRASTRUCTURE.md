@@ -13,6 +13,9 @@ provenance:
   - written: schiele/gpu-inference-server-host-on-wsl
     at: 2026-11-27T20:49:06Z
     mode: revise
+  - written: schiele/gpu-inference-server-plan-steps-5-to-12
+    at: 2026-11-27T23:04:42Z
+    mode: revise
 ---
 
 # autobot — Infrastructure
@@ -40,7 +43,7 @@ This document records the environments and accounts autobot runs in and talks to
 
 ### GPU inference server: `GAMEON1` (Windows 11 PC, Ubuntu in WSL2)
 
-The owner's Windows PC, added on 2026-11-27 to be autobot's GPU inference server on the LAN. Its planned role is to serve speech-to-text, a local language model for routing and for the core conversational agent, and possibly text-to-speech, to the NUC over the LAN. The NUC stays the front end. The server's behaviour is specified in `docs/specs/active/autobot-gpu-inference-server-SPEC.md` (IS-1 to IS-14). **Nothing of autobot runs here yet**: no server code exists, no port is open to the LAN, no firewall rule, start-up task or address reservation has been made. The facts below were read from the machine on 2026-11-27 from inside WSL (`wsl.exe --version`, `nvidia-smi`, `lscpu`, `free`, `df`, `ip`, and read-only PowerShell `Get-*` and `powercfg` queries); nothing was changed.
+The owner's Windows PC, added on 2026-11-27 to be autobot's GPU inference server on the LAN. Its planned role is to serve speech-to-text, a local language model for routing and for the core conversational agent, and possibly text-to-speech, to the NUC over the LAN. The NUC stays the front end. The server's behaviour is specified in `docs/specs/active/autobot-gpu-inference-server-SPEC.md` (IS-1 to IS-14). The server's code is in the repository (`server/`, and `make server-*`), built and tested on the NUC on fakes. **It has not yet been set up or run on this host**: as far as this document knows, no `.venv-server` exists here, no model has been fetched, no token made, no port is open to the LAN, and no firewall rule, start-up task or address reservation has been made. "Setting the server up" below is the order to do that in. The facts below were read from the machine on 2026-11-27 from inside WSL (`wsl.exe --version`, `nvidia-smi`, `lscpu`, `free`, `df`, `ip`, and read-only PowerShell `Get-*` and `powercfg` queries); nothing was changed.
 
 - **Windows.** Windows 11 Home, version 10.0.26200.7623 (build 26200). Computer name `GAMEON1`, in the workgroup `WORKGROUP` (no domain). The Windows user profile is `charl`.
 - **WSL.** WSL 3.0.5.0, WSL kernel 6.18.58.1-1 (`6.18.58.1-microsoft-standard-WSL2`), WSLg 1.0.79. One distribution, `Ubuntu-24.04`, WSL version 2, Ubuntu 24.04.5 LTS. Its default user is `schiele` and systemd is on (`/etc/wsl.conf`: `[boot] systemd=true`); `systemctl is-system-running` reads `running`.
@@ -58,6 +61,22 @@ The owner's Windows PC, added on 2026-11-27 to be autobot's GPU inference server
 - **Power.** The active plan is `Balanced`. Sleep after idle and hibernate after idle on AC are both `0` (never). The machine supports S3 standby, hibernate and Fast Startup. Whether its network adapter can wake the machine (Wake-on-LAN) could not be read: `Get-NetAdapterPowerManagement` failed with "A device attached to the system is not functioning".
 - **Start-up.** No scheduled task starts WSL. WSL starts only when something on Windows runs `wsl.exe`, so after a reboot nothing of the distribution runs until the owner opens it.
 - **What does not apply here.** No microphone or speaker is used here; the NUC-only refusals (TS-11) stay as they are, because this host's hostname is not `host.nuc_hostname`. The `assistant` project does not exist on this host, so the `camera` agent cannot run here. No voice dataset, Google Cloud key or `gcloud` login exists here, and none is to (IS-6, IS-7).
+
+### Setting the server up on `GAMEON1`
+
+What the repository gives this host, and the order to use it in. Steps 1 and 2 are the owner's, by hand, with rights no `make` target has (IS-14). Everything from step 3 runs inside the `Ubuntu-24.04` distribution, in the checkout, and every `server-*` target refuses on any host whose name is not `[server] hostname`.
+
+1. **Windows and the router, by hand.** The DHCP reservation, both firewall rules and the start-up task, as "The LAN between them" lists them.
+2. **Inside WSL, with `sudo`, by hand.** `sudo apt install python3.12-venv python3-pip make nodejs`, and the Ollama install. Ollama is to listen on `127.0.0.1` only (its default), with `OLLAMA_NUM_PARALLEL=1` set on its service, so that one request at a time reaches the model (IS-10). A quantised KV cache (`OLLAMA_KV_CACHE_TYPE`) is to be tried on this card and is not yet measured.
+3. **`make server-setup`.** Builds `.venv-server`, the server's own virtual environment, and installs the `autobot_server` package from `server/` with its `gpu` extra: faster-whisper, and cuBLAS and cuDNN 9 from pip wheels, with no CUDA toolkit. The NUC's `.venv` is not used here and `autobot` is not installed.
+4. **`make server-fetch-models`.** The only downloader on this host. It fetches the CTranslate2 files of faster-whisper `large-v3-turbo` into `models/faster-whisper/large-v3-turbo/` (`[server] stt_model`), and prints the `ollama pull` for the language model, which the owner runs himself: the server never pulls.
+5. **`make server-token`.** Makes the shared bearer token, 32 random bytes as text, in `~/.config/autobot-server/token` at mode `0600`, when none is there, and prints the file's path, never the token. The owner opens the file himself and enters its one line at `make server-token` on the NUC, which asks at a hidden prompt and writes `secrets/server-token` at `0600` (git-ignored). Nothing copies the token across the LAN, and an agent never reads either file.
+6. **`make server-install`.** Renders `deploy/autobot-server.service` for this checkout, writes it to `~/.config/systemd/user/autobot-server.service`, enables it, turns lingering on (`loginctl enable-linger`) and starts it. From then on `make server-up`, `server-down`, `server-status` and `server-logs` drive the unit; without the unit they run the server in the background with its pid in `run/server.pid`. Both ways the log is `run/server.log`: one line per request (method, endpoint, size, duration, status) and nothing of what was said.
+7. **`make server-check`.** A loopback smoke test of `/health`, `/v1/stt` (with the committed synthetic fixture `tests/fixtures/audio/hey_autobot.wav`), `/v1/route` and `/v1/chat`, with the server's own token.
+8. **`make server-eval MODEL=<name>`**, once for each candidate language model. It writes `run/server-eval-<model>.json`. The owner writes the winner to `[server] llm_model` (IS-26). Until then `/health` reports routing and chat not ready, with that reason, and speech-to-text alone is served.
+9. **On the NUC, `make server-ping`.** One `/health` call with the NUC's token: `up` and the contract version, or the one-line reason.
+
+The unit starts the server when the WSL distribution starts. It exits with status 2, and is not restarted, when the configuration, the token, the host name or the VRAM budget is wrong; a model that fails to load or a GPU taken by a game never ends the process (IS-24).
 
 ### The LAN between them (planned)
 
@@ -121,7 +140,14 @@ Two files define what runs on the NUC:
 
 `pyproject.toml` defines the Python package and its dependencies, and `make setup` builds the `.venv` the unit runs from. `make fetch-models` fetches the model files into `models/`, and `make train-wakeword` trains a wake-word candidate there, which becomes the installed model only through the interface. Nothing defines the voice dataset but the recordings themselves: it cannot be rebuilt from the repository. The rest of the NUC is set up by hand: the operating system, PipeWire and its default source and sink, and lingering.
 
-Nothing in the repository defines the GPU inference server yet. `GAMEON1`'s Windows side (the `.wslconfig`, the firewall rules, the start-up task, the power plan) and the router's DHCP reservation are set by hand by the owner; the server's own code, its systemd unit template and its section of `config/autobot.toml` are to come from the server's plan, and will be named here when they exist.
+Four things in the repository define the GPU inference server:
+
+- `server/` is its package, `autobot_server`, with its own `server/pyproject.toml` and its GPU dependencies as the `gpu` extra. It does not import `autobot`. `make server-setup` builds `.venv-server` from it on `GAMEON1`; on the NUC `make setup` installs it without the extra, so that `make test`, `make lint` and `make typecheck` cover it on fakes.
+- The `[server]` table of `config/autobot.toml` holds both hosts' settings: the NUC reads the address, the token file's path, the timeouts, the poll intervals and the routing thresholds; the server reads its hostname, its models and its runtime.
+- `deploy/autobot-server.service` is the template of the server's systemd user unit, installed by `make server-install` and not copied by hand.
+- `server/contract/` holds the contract's version and one example of every request and response, which both hosts' test suites read.
+
+The token files are defined by nothing in the repository, on purpose: `~/.config/autobot-server/token` on `GAMEON1` and the git-ignored `secrets/server-token` on the NUC, each made by `make server-token` on its host. `GAMEON1`'s Windows side (the `.wslconfig`, the firewall rules, the start-up task, the power plan), the router's DHCP reservation, the `apt` packages and the Ollama install with its models are set by hand by the owner.
 
 The Google Cloud side has no infrastructure-as-code. Two files declare what it should hold:
 
@@ -149,6 +175,7 @@ The Google Cloud screen builds the `gcloud` commands from those two files and ch
 - **GPU server: sleep and wake.** Sleep is off on AC today. Is the machine also used as the owner's own PC (it is named `GAMEON1`), so that games or Windows Update restarts take the GPU and the host away at times? Can it be woken from the NUC (Wake-on-LAN could not be read)?
 - **GPU server: WSL memory.** WSL gets 15 GiB of the 32 GB. Is that enough for the server's CPU-side work, or should `.wslconfig` set `memory=`? That is a Windows-side change for the owner.
 - **GPU server: Python setup.** `python3.12-venv` and `python3-pip` are missing in WSL; installing them needs `sudo` in WSL, which the owner runs.
+- **GPU server: not yet run.** The server's code and its `make` targets were built and tested on the NUC, on fakes, and over loopback HTTP with fake models. Nothing of "Setting the server up" has been run on `GAMEON1`: `make server-install`, `make server-check`, `make server-eval` and, from the NUC, `make server-ping` against the real server are still to be done, and this document is to be corrected from what they show. Whether Ollama's `think` request field and `OLLAMA_KV_CACHE_TYPE` behave on this card as the code and step 2 assume is part of that.
 
 - **Which resources are in place today.** This document records what the configuration names and the screen checks for. It does not record the screen's readings: whether every API is enabled, every role granted, the key created, the secret holding a version, and the fourteen caps accepted. Recommended: after the next round of checks, mark here anything that is not *ready*, since a descriptive document should say what a person would find.
 - **Billing account.** The billing account `schiele-autobot-dev` is linked to is not recorded. Recommended: record its id here (it is an identifier, not a secret), so that the spend on the uncapped Gemini API can be traced.

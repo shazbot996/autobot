@@ -571,7 +571,7 @@ def _gemini(config: GcpConfig, probe: _Probe) -> Step:
     findings = [
         Finding(
             f"autobot calls Gemini on Vertex AI ({config.gemini_api}) in "
-            f"{config.region}, as the service account"
+            f"{config.gemini_location}, as the service account"
             if vertex
             else f"autobot calls the Gemini Developer API ({config.gemini_api}), "
             "with an API key kept as a secret",

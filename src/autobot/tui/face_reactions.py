@@ -43,7 +43,16 @@ LIDS = ("open", "wide", "half", "closed")
 
 IDLE = "idle"
 # The reactions the built-in set defines: one per state the face passes through.
-REACTION_NAMES = (IDLE, "wake", "listening", "speaking", "working", "trouble", "done")
+REACTION_NAMES = (
+    IDLE,
+    "wake",
+    "listening",
+    "speaking",
+    "working",
+    "trouble",
+    "done",
+    "notice",
+)
 
 _POSE_KEYS = ("pupil", "lid", "hold")
 _REACTION_KEYS = ("poses", "loop", "random")
@@ -68,6 +77,15 @@ BUILTIN_REACTIONS: dict[str, dict[str, Any]] = {
             {"pupil": "up", "hold": _GLANCE},
             {"pupil": "down", "hold": _GLANCE},
             {"lid": "closed", "hold": _BLINK},
+        ],
+    },
+    # Something changed that the owner did not ask about, as when the
+    # inference server comes or goes (IS-23): a wide look up, then back.
+    "notice": {
+        "poses": [
+            {"pupil": "up", "lid": "wide", "hold": 500},
+            {"pupil": "center", "lid": "wide", "hold": 400},
+            {"pupil": "center", "hold": 300},
         ],
     },
     # The phrase was heard: eyes wide, straight ahead.

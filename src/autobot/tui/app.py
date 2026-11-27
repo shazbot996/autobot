@@ -46,7 +46,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from autobot import __version__
-from autobot.config import Config, ConfigError, config_path, repo_root
+from autobot.config import (
+    MODEL_GEMINI,
+    MODEL_LOCAL,
+    Config,
+    ConfigError,
+    config_path,
+    repo_root,
+)
 from autobot.gcp.client import GoogleCloud
 from autobot.gcp.client import connect as gcp_connect
 from autobot.gcp.keyfile import GitCheckIgnore, git_check_ignore
@@ -75,6 +82,8 @@ from autobot.tui.runner import (
     spawn_function,
     train_argv,
 )
+from autobot.tui.server_state import BADGE_ROLES as SERVER_BADGE_ROLES
+from autobot.tui.server_state import badge as server_badge
 from autobot.tui.state import (
     BADGE_ROLES,
     State,
@@ -90,7 +99,11 @@ from autobot.wakeword.script import Prompt, build_script
 
 if TYPE_CHECKING:
     from autobot.agents.gemini import Model
+    from autobot.agents.hearing import Hearing
     from autobot.agents.weather_api import Lookup
+    from autobot.embedding import Embedder
+    from autobot.server.client import ServerClient
+    from autobot.server.watch import ServerWatch
     from autobot.wakeword.evaluate import KindScores, RealScores
 
 # Set these to try the interface against other directories (module docstring).
@@ -213,6 +226,62 @@ class Services:
     # Makes the language model behind the question agent for a configuration:
     # Gemini through the ADK unless given; tests give a fake model.
     model: Callable[[Config, Path], Model] = field(default=None)  # type: ignore[assignment]
+    # Makes the local language model, the inference server's, for an agent
+    # whose model is `local` (IS-18): over `server_client` unless given.
+    local_model: Callable[[Config, Path], Model] = field(default=None)  # type: ignore[assignment]
+    # Transcribes what the owner says after an agent's own cue (the question
+    # agent), locally with faster-whisper; tests give a fake that loads no model.
+    hearing: Hearing = field(default=None)  # type: ignore[assignment]
+    # The inference server on the LAN (IS-23): the client that calls it and
+    # the watcher that keeps what was last learned of it. Both are built from
+    # the configuration by `connect_server` unless given; tests give fakes
+    # that open no socket and read no token.
+    server_client: ServerClient = field(default=None)  # type: ignore[assignment]
+    server_watch: ServerWatch = field(default=None)  # type: ignore[assignment]
+    # The sentence embeddings of the routing cascade's tier 2 (IS-17):
+    # `[server] embedding_model` under the models root, loaded from that
+    # path only, unless given; tests give a fake that loads no model.
+    embedder: Embedder = field(default=None)  # type: ignore[assignment]
+
+    def connect_server(self, config: Config) -> ServerWatch:
+        """The watcher of the inference server `[server]` names, built once.
+
+        With `[server] stt_enabled` the hearing asks the server first and
+        keeps the local model as its fallback (IS-4, IS-8).
+        """
+        if self.server_client is None:
+            from autobot.server.client import ServerClient
+
+            self.server_client = ServerClient(config.server, clock=self.clock)
+        if self.server_watch is None:
+            from autobot.server.watch import ServerWatch
+
+            self.server_watch = ServerWatch(
+                config.server, self.server_client, clock=self.clock, spawn=self.spawn
+            )
+        if self.local_model is None:
+            from autobot.agents.local_model import ServerModel
+
+            client = self.server_client
+            self.local_model = lambda config, repo: ServerModel(client)
+        if self.embedder is None:
+            from autobot.embedding import LocalEmbedder
+
+            self.embedder = LocalEmbedder(
+                self.models_root / config.server.embedding_model
+            )
+        if config.server.enabled and config.server.stt_enabled:
+            from autobot.agents.hearing import ServerHearing
+            from autobot.server.hints import build_hints
+
+            if not isinstance(self.hearing, ServerHearing):
+                self.hearing = ServerHearing(
+                    self.server_client,
+                    self.server_watch,
+                    self.hearing,
+                    build_hints(config),
+                )
+        return self.server_watch
 
     def seams(self) -> Seams:
         """What the agents reach the world through, for the face (`face.Seams`)."""
@@ -221,7 +290,11 @@ class Services:
             launch=self.launch,
             connect=self.gcp_connect,
             weather=self.weather_lookup,
-            model=self.model,
+            models={MODEL_GEMINI: self.model, MODEL_LOCAL: self.local_model},
+            hearing=self.hearing,
+            watch=self.server_watch,
+            server=self.server_client,
+            embedder=self.embedder,
         )
 
     def __post_init__(self) -> None:
@@ -244,6 +317,10 @@ class Services:
             self.events = EventStream(self.repo / SOCKET_PATH)
         if self.models_root is None:
             self.models_root = self.repo
+        if self.hearing is None:
+            from autobot.agents.hearing import LocalHearing
+
+            self.hearing = LocalHearing(self.models_root)
 
 
 def default_services() -> Services:
@@ -488,6 +565,8 @@ class App:
         self.services = services
         self.config: Config = services.store.load()
         self.themes = themes
+        # What the NUC last learned of the inference server (IS-23).
+        self.server = services.connect_server(self.config)
         self.views: list[View] = []
         self.status = ""
         self.status_role = "normal"
@@ -601,6 +680,14 @@ class App:
             listener_status_argv(), cwd=services.repo, timeout=LISTENER_STATUS_TIMEOUT
         )
 
+    def poll_server(self) -> None:
+        """One tick of the inference server's watcher; never blocks (IS-23).
+
+        Every frame, on every screen: the watcher asks only when its own
+        schedule says so, on a worker thread, and takes the answer later.
+        """
+        self.server.tick()
+
     # --- themes ---------------------------------------------------------------
 
     def apply_theme(self, theme: Theme) -> None:
@@ -706,6 +793,7 @@ class App:
     def frame(self, overlay: Callable[[Canvas], None] | None = None) -> int:
         """Draw one frame and wait up to `FRAME_MS` for a key; -1 when none came."""
         self._frames += 1
+        self.poll_server()
         if self.views:
             self.views[-1].tick()
         self.draw(overlay)
@@ -747,12 +835,21 @@ class App:
         canvas.put(0, width - len(right), right, theme.title)
         # The listener's state is on every screen, not only the main menu.
         state = self.state()
+        listener = f" {state.value.upper()} "
         canvas.put(
             0,
             len(title) + 2,
-            f" {state.value.upper()} ",
+            listener,
             getattr(theme, BADGE_ROLES[state]),
         )
+        # The inference server's state stands beside it (IS-23), where the
+        # line is wide enough for both and the host's name.
+        server = f" {server_badge(self.server)} "
+        at = len(title) + 2 + len(listener) + 1
+        if at + len(server) + 1 <= width - len(right):
+            canvas.put(
+                0, at, server, getattr(theme, SERVER_BADGE_ROLES[self.server.state])
+            )
 
         view = self.views[-1] if self.views else None
         frame = Rect(1, 0, height - 3, width)

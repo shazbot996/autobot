@@ -29,6 +29,10 @@ dependencies = [
     "sentencepiece>=0.2",
     "sherpa-onnx>=2.0",
     "sounddevice>=0.4.6",
+    # The routing cascade's tier 2 (IS-17): tokenizes a transcript for the
+    # sentence-embedding model, which onnxruntime runs. It reads a local
+    # `tokenizer.json` and nothing else: no lookup, no download.
+    "tokenizers>=0.15",
 ]
 
 [project.optional-dependencies]
@@ -50,20 +54,23 @@ train = [
 where = ["src"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
-# So that a test under tests/tui can import the fake Google Cloud of tests/gcp.
-pythonpath = ["tests"]
+# The inference server's tests run here too, on fakes: they need no GPU, no
+# model and no network (IS-12).
+testpaths = ["tests", "server/tests"]
+# So that a test under tests/tui can import the fake Google Cloud of tests/gcp,
+# and the server's tests find `autobot_server` before it is installed.
+pythonpath = ["tests", "server/src"]
 addopts = "-ra"
 
 [tool.ruff]
-src = ["src", "tests"]
+src = ["src", "tests", "server/src", "server/tests"]
 target-version = "py312"
 # CR2's documents and run records are not code and are never reformatted.
 extend-exclude = ["docs", "prompts", ".cr2"]
 
 [tool.mypy]
 python_version = "3.12"
-files = ["src", "tests"]
+files = ["src", "tests", "server/src", "server/tests"]
 strict = true
 
 [[tool.mypy.overrides]]

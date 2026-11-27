@@ -206,6 +206,17 @@ class Ticker:
                 self._wake(str(event.get("phrase", "")))
         self._catch_up()
 
+    def note(self, text: str) -> None:
+        """Put a line of the face's own on the strip, as "server up" (IS-23).
+
+        It is not something the listener heard, so it belongs to no stretch
+        and is shown even while the face holds the listener.
+        """
+        line = " ".join(text.split())
+        if line:
+            self._add(_Item(line, [], None, 0))
+            self._catch_up()
+
     def _see(self, stretch: int) -> None:
         if self._stretch is not None and stretch < self._stretch:
             # The listener started again and numbers its stretches from 1.

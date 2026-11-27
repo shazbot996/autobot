@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from autobot.agents.base import Agent, Launch
 from autobot.config import (
     AGENT_CAMERA,
+    AGENT_CORE,
     AGENT_ECHO,
     AGENT_INTRODUCE,
     AGENT_QUESTION,
@@ -79,6 +80,12 @@ def _introduce(launch: Launch) -> Experience:
     from autobot.agents.introduce import Introduce
 
     return Introduce(launch)
+
+
+def _core(launch: Launch) -> Experience:
+    from autobot.agents.core import Core
+
+    return Core(launch)
 
 
 def _by_name(*agents: Agent) -> Mapping[str, Agent]:
@@ -150,5 +157,20 @@ AGENTS: Mapping[str, Agent] = _by_name(
         uses_model=False,
         sends_requests=False,
         factory=_introduce,
+    ),
+    BuiltAgent(
+        AGENT_CORE,
+        "autobot himself: takes what you say when no command matches and "
+        "talks with you, a turn at a time, on the language model of the "
+        "inference server in the house, with the prompt below as his "
+        "personality. He speaks each sentence as it arrives. The "
+        "conversation is kept on this machine, in memory, for the session "
+        "only, and is sent whole with each turn, as text. He can hand a "
+        "hard question to an agent whose model is gemini, which asks from "
+        "this machine after that agent's own confirmation. When the server "
+        "is away he follows the fallback below.",
+        uses_model=True,
+        sends_requests=True,
+        factory=_core,
     ),
 )

@@ -17,7 +17,10 @@ Without options it fetches what the listener and the tests need:
   (`models/sherpa-kws/`): a 17 MB archive, of which five files are kept,
 - the Census Bureau's gazetteer of zip-code centroids, which the weather
   agent turns a zip code into coordinates with (`models/geo/zcta.tsv`): a
-  1 MB archive, of which three columns of the one table are kept.
+  1 MB archive, of which three columns of the one table are kept,
+- the sentence-embedding model of the routing cascade's tier 2,
+  `all-MiniLM-L6-v2` as an 8-bit ONNX file of about 23 MB, with its
+  `tokenizer.json` beside it (`models/embedding/all-MiniLM-L6-v2/`).
 
 The trained wake-word model itself is not fetched: `make train-wakeword`
 builds it.
@@ -97,6 +100,16 @@ GEO_URL = (
     "2026_Gazetteer/2026_Gaz_zcta_national.zip"
 )
 GEO_COLUMNS = (GEO_ZIP_COLUMN, GEO_LATITUDE_COLUMN, GEO_LONGITUDE_COLUMN)
+# The sentence-embedding model of the routing cascade's tier 2 (IS-17):
+# all-MiniLM-L6-v2, exported to ONNX and quantised to 8 bits, and its
+# tokenizer. It runs on the NUC's CPU and is loaded from its local path only.
+EMBEDDING_URL = f"{HUGGING_FACE}/Xenova/all-MiniLM-L6-v2/resolve/main"
+EMBEDDING_DIR = Path("embedding") / "all-MiniLM-L6-v2"
+# What is fetched, and the name it is kept under beside the other.
+EMBEDDING_FILES = (
+    ("onnx/model_quantized.onnx", "model_int8.onnx"),
+    ("tokenizer.json", "tokenizer.json"),
+)
 # Fewer rows than this is not the national table (it holds about 33,800).
 GEO_MIN_ROWS = 30_000
 
@@ -162,6 +175,14 @@ def runtime_assets(ack_voice: str) -> list[Asset]:
         for name in WHISPER_FILES
     ]
     return assets + voice_assets(ack_voice)
+
+
+def embedding_assets() -> list[Asset]:
+    """The routing cascade's tier 2 model and its tokenizer (IS-17)."""
+    return [
+        Asset(f"{EMBEDDING_URL}/{source}", EMBEDDING_DIR / name)
+        for source, name in EMBEDDING_FILES
+    ]
 
 
 def training_assets(acav_gigabytes: float) -> list[Asset]:
@@ -453,7 +474,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     models = resolve_repo_path(MODELS_DIR)
     try:
-        runtime = runtime_assets(ack_voice())
+        runtime = [*runtime_assets(ack_voice()), *embedding_assets()]
         assets = list(runtime)
         if args.training:
             assets += training_assets(args.acav_gb)

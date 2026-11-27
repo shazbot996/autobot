@@ -17,6 +17,7 @@ from tui_fakes import (
     make_harness,
 )
 
+from autobot.agents.question import COUNT_WORDS, INVITE
 from autobot.tui.app import FRAME_MS, MIN_HEIGHT, MIN_WIDTH
 from autobot.tui.echo import FINISHED, HEARD, PLAYING_BACK, RECORD_SECONDS, SPEECH_LINE
 from autobot.tui.face_ticker import DOWN_TEXT
@@ -133,9 +134,14 @@ def test_face_opens_from_the_main_menu_with_its_layout(
     assert PROMPT in frame
     # Disconnected, the ticker on the last row inside the frame says so.
     assert DOWN_TEXT in lines[ticker_row(rows)]
-    # On the NUC, the microphone opened and the line was rendered once.
+    # On the NUC, the microphone opened and the lines were rendered once:
+    # the echo's, and the question agent's invitation and count.
     assert harness.audio.opened == [3]
-    assert [call[0] for call in harness.voice.calls] == [SPEECH_LINE]
+    assert [call[0] for call in harness.voice.calls] == [
+        SPEECH_LINE,
+        INVITE,
+        *COUNT_WORDS,
+    ]
     # Leaving closed the stream and the event stream.
     assert all(stream.closed for stream in harness.audio.streams)
     assert harness.events.closes >= 1

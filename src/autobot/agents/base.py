@@ -17,10 +17,11 @@ machine.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Protocol
 
-from autobot.config import AgentConfig
+from autobot.config import AgentConfig, ParameterValue
 from autobot.tui.face import Experience
 
 
@@ -34,6 +35,9 @@ class Launch:
     mode: str
     # The transcript the rule matched in.
     transcript: str
+    # The slots the route filled for the agent, by name (IS-18); empty when
+    # a keyword or a semantic match routed it.
+    parameters: Mapping[str, ParameterValue] = field(default_factory=dict)
 
 
 class Agent(Protocol):

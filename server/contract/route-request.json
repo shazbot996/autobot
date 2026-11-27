@@ -1,0 +1,54 @@
+{
+  "transcript": "will I need an umbrella this afternoon",
+  "agents": [
+    {
+      "name": "question",
+      "description": "Asks a language model your question and answers with a spoken summary and the details on the screen.",
+      "commands": ["question"],
+      "modes": [],
+      "parameters": []
+    },
+    {
+      "name": "weather",
+      "description": "Says today's weather for your zip code; the forecast command gives the days ahead.",
+      "commands": ["weather", "forecast"],
+      "modes": ["forecast"],
+      "parameters": [
+        {
+          "name": "day",
+          "type": "string",
+          "values": ["today", "tomorrow"],
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "time",
+      "description": "Says the time from this computer's clock.",
+      "commands": ["time"],
+      "modes": [],
+      "parameters": []
+    },
+    {
+      "name": "camera",
+      "description": "Opens the camera application, with the four outside cameras, in Firefox on the NUC.",
+      "commands": ["camera", "cameras"],
+      "modes": [],
+      "parameters": []
+    },
+    {
+      "name": "introduce",
+      "description": "autobot introduces himself and says how he works.",
+      "commands": ["introduce"],
+      "modes": [],
+      "parameters": []
+    },
+    {
+      "name": "echo",
+      "description": "Records five seconds of your voice and plays it back.",
+      "commands": ["echo"],
+      "modes": [],
+      "parameters": []
+    }
+  ]
+}

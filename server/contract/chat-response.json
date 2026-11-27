@@ -1,0 +1,11 @@
+{
+  "message": {
+    "role": "assistant",
+    "content": "{\"summary\": \"Your nine minute timer is running.\", \"detail\": [\"timer: 9 min\"]}"
+  },
+  "model": "qwen3:8b",
+  "tokens": {
+    "prompt": 486,
+    "completion": 24
+  }
+}

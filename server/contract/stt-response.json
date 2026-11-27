@@ -1,0 +1,14 @@
+{
+  "text": "Will I need an umbrella this afternoon?",
+  "language": "en",
+  "segments": [
+    {
+      "start_seconds": 0.0,
+      "end_seconds": 2.1,
+      "text": "Will I need an umbrella this afternoon?"
+    }
+  ],
+  "duration_seconds": 2.4,
+  "elapsed_seconds": 0.31,
+  "model": "large-v3-turbo"
+}

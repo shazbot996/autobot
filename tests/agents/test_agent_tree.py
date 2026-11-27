@@ -4,6 +4,7 @@ import itertools
 import tomllib
 
 from autobot.agents.tree import (
+    DEFAULT_COMMAND,
     LEVEL_AGENTS,
     LEVEL_ROOT,
     MARK_ENTRY,
@@ -13,7 +14,7 @@ from autobot.agents.tree import (
     build_tree,
     layout,
 )
-from autobot.config import ROUTE_AGENTS, Config, load_config, parse_config
+from autobot.config import AGENT_CORE, ROUTE_AGENTS, Config, load_config, parse_config
 from autobot.tui.ui import Glyphs
 
 COMMITTED = load_config()
@@ -51,8 +52,21 @@ def test_the_root_is_the_wake_phrase_and_the_agents_stand_in_rule_order() -> Non
     assert tree.root.name == "autobot"
     assert tree.root.root
     names = [node.name for node in tree.agents]
-    assert names == ["question", "weather", "time", "camera", "introduce", "echo"]
+    assert names == [
+        "question",
+        "weather",
+        "time",
+        "camera",
+        "introduce",
+        "echo",
+        "core",
+    ]
+    # The core agent has no rule: it stands last, as the default of the level.
     assert sorted(names) == sorted(ROUTE_AGENTS)
+    (default,) = tree.edges_to(tree.node(AGENT_CORE))
+    assert (default.default, default.label) == (True, DEFAULT_COMMAND)
+    assert DEFAULT_COMMAND == "(anything else)"
+    assert not any(edge.default for edge in tree.edges[:-1])
     assert tree.levels == ((tree.root,), tree.agents)
 
 
@@ -67,7 +81,8 @@ def test_two_rules_to_one_agent_are_two_edges_into_one_node() -> None:
         "camera",
         "cameras",
     ]
-    assert len(tree.edges) == len(COMMITTED.routes)
+    # An edge per rule, and the default edge into the core agent.
+    assert len(tree.edges) == len(COMMITTED.routes) + 1
 
 
 def test_every_edge_label_stands_in_the_picture_where_it_says() -> None:

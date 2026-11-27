@@ -306,6 +306,10 @@ The **inference server** is a second program of autobot. It runs on `GAMEON1`, t
 - **docs/context/ARCH.md.** Add the server as a part, and the seams between it and the listener, the rules layer and the agents.
 - **docs/context/INFRASTRUCTURE.md.** Confirm that the CPU is a 5800X3D, as it already says. Add the token files, the systemd user unit with lingering, and whether WSL idles a systemd distribution.
 
-## Open Questions
+## Deferred Questions - tbd
 
 - **Which model family wins `make server-eval`.** Recommended: the candidate of IS-10 with the best route accuracy and JSON validity that stays within IS-4's latency budget. Routing correctness is what the rules layer depends on. The owner could not name a winner and accepted this as the criterion (recorded in IS-26); the winner is still to be measured.
+
+## Open Questions
+
+None

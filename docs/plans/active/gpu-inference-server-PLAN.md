@@ -4,6 +4,23 @@ type: plan
 title: GPU inference server
 authority: prescriptive
 status: active
+steps:
+  total: 12
+  completed: [1, 2, 3, 4, 5, 7, 8, 9, 10, 11]
+  current: 6
+  status:
+    1: { state: "completed", run: "schiele/0138", at: "2026-11-27T21:35:24.810Z" }
+    2: { state: "completed", run: "schiele/0140", at: "2026-11-27T21:45:10.274Z" }
+    3: { state: "completed", run: "schiele/0142", at: "2026-11-27T21:52:14.549Z" }
+    4: { state: "completed", run: "schiele/0144", at: "2026-11-27T22:03:35.966Z" }
+    5: { state: "completed", written: "schiele/gpu-inference-server-plan-steps-5-to-12", at: "2026-11-27T23:04:42Z" }
+    6: { state: "failed", written: "schiele/gpu-inference-server-plan-steps-5-to-12", at: "2026-11-27T23:04:42Z" }
+    7: { state: "completed", written: "schiele/gpu-inference-server-plan-steps-5-to-12", at: "2026-11-27T23:04:42Z" }
+    8: { state: "completed", written: "schiele/gpu-inference-server-plan-steps-5-to-12", at: "2026-11-27T23:04:42Z" }
+    9: { state: "completed", written: "schiele/gpu-inference-server-plan-steps-5-to-12", at: "2026-11-27T23:04:42Z" }
+    10: { state: "completed", written: "schiele/gpu-inference-server-plan-steps-5-to-12", at: "2026-11-27T23:04:42Z" }
+    11: { state: "completed", written: "schiele/gpu-inference-server-plan-steps-5-to-12", at: "2026-11-27T23:04:42Z" }
+    12: { state: "failed", written: "schiele/gpu-inference-server-plan-steps-5-to-12", at: "2026-11-27T23:04:42Z" }
 describes:
   - config/autobot.toml
   - pyproject.toml
@@ -114,6 +131,9 @@ provenance:
   - run: schiele/0135
     at: 2026-11-27T21:34:07.324Z
     mode: revise
+  - written: schiele/gpu-inference-server-plan-steps-5-to-12
+    at: 2026-11-27T23:04:42Z
+    mode: apply
 ---
 
 # GPU Inference Server — Implementation Plan

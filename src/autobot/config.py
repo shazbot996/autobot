@@ -18,6 +18,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
+from urllib.parse import urlsplit
 
 CONFIG_ENV_VAR = "AUTOBOT_CONFIG"
 DEFAULT_CONFIG_PATH = Path("config/autobot.toml")
@@ -41,6 +42,8 @@ AGENT_WEATHER = "weather"
 AGENT_TIME = "time"
 AGENT_CAMERA = "camera"
 AGENT_INTRODUCE = "introduce"
+# The conversational agent: the default when no route is admitted (IS-19).
+AGENT_CORE = "core"
 ROUTE_AGENTS = (
     AGENT_ECHO,
     AGENT_QUESTION,
@@ -48,9 +51,27 @@ ROUTE_AGENTS = (
     AGENT_TIME,
     AGENT_CAMERA,
     AGENT_INTRODUCE,
+    AGENT_CORE,
 )
 # The mode the `forecast` rule hands the weather agent (AG-7).
 MODE_FORECAST = "forecast"
+
+# The model behind an agent (IS-18): none (code only), the inference server's
+# language model, or Gemini as the service account.
+MODEL_NONE = "none"
+MODEL_LOCAL = "local"
+MODEL_GEMINI = "gemini"
+AGENT_MODELS = (MODEL_NONE, MODEL_LOCAL, MODEL_GEMINI)
+
+# The type of an agent's parameter, or of a tool's (IS-18, IS-21).
+PARAMETER_TYPES = ("string", "integer", "number", "boolean")
+# A parameter's or a tool's name: lower-case letters, digits and underscores.
+_SLOT_NAME = re.compile(r"[a-z_][a-z0-9_]*")
+
+# The server's speech-to-text compute types that Turing has (IS-10).
+STT_COMPUTE_TYPES = ("int8_float16", "float16")
+# The language model runtimes the server can reach (IS-10).
+SERVER_RUNTIMES = ("ollama",)
 
 # The Gemini API the `question` agent calls (GC-11): Vertex AI, as the service
 # account, or the Gemini Developer API, with an API key kept as a secret.
@@ -66,6 +87,8 @@ SERVICE_ACCOUNT_DOMAIN = ".iam.gserviceaccount.com"
 _PROJECT_ID = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]")
 # A region, as `us-east5` or `northamerica-northeast1`.
 _REGION = re.compile(r"[a-z]+(-[a-z]+)+[0-9]+")
+# The location that serves a model from Google's whole network, not one region.
+GLOBAL_LOCATION = "global"
 # A model's id, as it stands in a request: `gemini-2.5-flash`.
 _MODEL_ID = re.compile(r"[a-z0-9][a-z0-9._-]{1,62}")
 _SERVICE_ACCOUNT = re.compile(
@@ -138,6 +161,9 @@ class RouteConfig:
     # A word the agent receives with the command, as a parameter (AG-7):
     # `forecast` on a weather rule. Empty when the rule carries none.
     mode: str = ""
+    # Phrases that mean the same as the command, for the semantic match of
+    # the cascade's tier 2 (IS-17). Empty when the rule has none.
+    examples: tuple[str, ...] = ()
 
 
 # The rules when the file has no `[[routes]]`, in the order of the tree:
@@ -177,11 +203,39 @@ _AGENT_KEYS = (
     "confirm_request",
     "confirm_request_question",
     "listening",
+    "model",
+    "fallback",
+    "parameters",
+    "tools",
 )
 # A zip code: five digits.
 _ZIP_CODE = re.compile(r"[0-9]{5}")
 # A Secret Manager secret's id.
 _SECRET_ID = re.compile(r"[A-Za-z0-9_-]{1,255}")
+
+# An allowed value of a parameter, of the parameter's type.
+type ParameterValue = str | int | float | bool
+
+
+@dataclass(frozen=True)
+class ParameterConfig:
+    """One named slot of an agent or a tool: `[[agents.parameters]]` (IS-18)."""
+
+    name: str
+    # One of `PARAMETER_TYPES`.
+    type: str = "string"
+    # The values it may take; empty when any value of its type will do.
+    values: tuple[ParameterValue, ...] = ()
+    required: bool = False
+
+
+@dataclass(frozen=True)
+class ToolConfig:
+    """One tool an agent's model may call, run on the NUC: `[[agents.tools]]` (IS-21)."""
+
+    name: str
+    description: str = ""
+    parameters: tuple[ParameterConfig, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -208,6 +262,15 @@ class AgentConfig:
     confirm_request_question: str = DEFAULT_REQUEST_QUESTION
     # Whether the face listens while the agent's running view is shown (AG-15).
     listening: bool = True
+    # The model behind the agent, one of `AGENT_MODELS` (IS-18).
+    model: str = MODEL_NONE
+    # What the agent falls back to, in order, when its model cannot answer:
+    # entries of `AGENT_MODELS` and, last only, a line the agent says.
+    fallback: tuple[str, ...] = ()
+    # The named slots a route fills for the agent (IS-18).
+    parameters: tuple[ParameterConfig, ...] = ()
+    # The tools its model may call; the NUC runs them (IS-21).
+    tools: tuple[ToolConfig, ...] = ()
     # weather: the location, five digits; empty until the owner sets it.
     zip_code: str = ""
     # weather: the agent's own cap on its lookups (GC-10 is the backstop).
@@ -244,6 +307,20 @@ When you ask me a question, only the words I heard go out to a language model.
 Say cancel at any time to go back a step.
 """
 
+# The core agent's personality: its system prompt (IS-19). It asks for the
+# two parts of AG-4, as the question agent's prompt does.
+CORE_PROMPT = """\
+You are autobot, a friendly voice assistant on the owner's computer at home.
+You talk with the owner out loud, one turn at a time, and remember what was
+said earlier in the conversation.
+Keep each reply short and plain: one to three sentences that are easy to
+hear, with no lists, symbols or markup.
+When a question needs more knowledge or reasoning than you have, hand it to
+one of the agents you are given, with the question that agent should get.
+"""
+# What the core agent says when neither the server nor Gemini can answer.
+CORE_AWAY_LINE = "the server is away"
+
 # The camera agent's commands: the proxy server, then the browser.
 CAMERA_COMMANDS = """\
 make fourway-server
@@ -263,6 +340,7 @@ DEFAULT_AGENTS = (
             "summary and the details on the screen."
         ),
         prompt=QUESTION_PROMPT,
+        model=MODEL_GEMINI,
     ),
     AgentConfig(
         name=AGENT_WEATHER,
@@ -287,6 +365,17 @@ DEFAULT_AGENTS = (
         name=AGENT_INTRODUCE,
         description="autobot introduces himself and says how he works.",
         prompt=INTRODUCE_SCRIPT,
+    ),
+    AgentConfig(
+        name=AGENT_CORE,
+        description=(
+            "autobot himself: talks with you when no command matches, on the "
+            "inference server's language model."
+        ),
+        prompt=CORE_PROMPT,
+        listening=True,
+        model=MODEL_LOCAL,
+        fallback=(MODEL_GEMINI, CORE_AWAY_LINE),
     ),
 )
 
@@ -362,6 +451,11 @@ class GcpConfig:
     # until one is chosen on the Gemini step. A cap on a quota that is counted
     # per model is for this model unless its entry names another.
     gemini_model: str = ""
+    # Where Vertex AI serves `gemini_model`: `global`, or a region such as
+    # `us-east5`. The newer Gemini models are served only at `global`, and a
+    # model asked for in a region that does not serve it answers 404. Quotas
+    # are still compared in `region`.
+    gemini_location: str = GLOBAL_LOCATION
     # The Cloud Storage buckets autobot is meant to use; none yet (GC-12).
     buckets: tuple[str, ...] = ()
     quotas: tuple[QuotaConfig, ...] = ()
@@ -370,6 +464,88 @@ class GcpConfig:
     def credentials_path(self) -> Path:
         """The absolute path of the key file."""
         return resolve_repo_path(self.credentials_file)
+
+
+@dataclass(frozen=True)
+class ServerConfig:
+    """The GPU inference server on `GAMEON1`, and how the NUC reaches it (IS-3).
+
+    The NUC reads the address, the token file, the timeouts, the poll
+    intervals and the thresholds; the server reads its hostname and its
+    models from the same table.
+    """
+
+    # Whether the NUC looks for the server at all.
+    enabled: bool = True
+    # Whether what is said inside a session is sent to the server to be
+    # transcribed (IS-8). Off until `CONSTRAINTS.md` `CN-1` is amended to
+    # allow speech-to-text on the owner's other machine in the house: until
+    # then every transcript is the NUC's own.
+    stt_enabled: bool = False
+    # The server's base URL, `http://host:port`; the port is what it binds.
+    url: str = "http://192.168.86.53:8300"
+    # The shared bearer token's file on the NUC, relative to the repository
+    # root. Only the path is configuration: the file is a secret (IS-13).
+    token_file: str = "secrets/server-token"
+    # The hostname the server refuses to run anywhere but (IS-25).
+    hostname: str = "GAMEON1"
+    # The timeouts of each call, in seconds (IS-4).
+    health_timeout: float = 1.0
+    stt_timeout_base: float = 0.5
+    stt_timeout_per_second: float = 0.25
+    route_timeout: float = 1.5
+    chat_first_token_timeout: float = 3.0
+    chat_timeout: float = 30.0
+    # How often `/health` is polled, in seconds: while up, and the back-off
+    # from the least to the most while down (IS-23).
+    poll_up_seconds: float = 5.0
+    poll_down_min_seconds: float = 5.0
+    poll_down_max_seconds: float = 60.0
+    # The confidence each routing tier must reach to be admitted (IS-17).
+    tier2_threshold: float = 0.6
+    tier3_threshold: float = 0.7
+    # The most characters of hints sent with a transcription (IS-16).
+    hint_chars: int = 500
+    # The most rounds of tool calls in one turn (IS-21).
+    tool_rounds: int = 3
+    # How long, in seconds, the core agent waits for the next turn (IS-19).
+    core_listen_seconds: float = 10.0
+    # The server's speech-to-text model, relative to its checkout (IS-10).
+    stt_model: str = "models/faster-whisper/large-v3-turbo"
+    # One of `STT_COMPUTE_TYPES`.
+    stt_compute_type: str = "int8_float16"
+    # The language model, as the runtime names it; empty until
+    # `make server-eval` has chosen one (IS-26).
+    llm_model: str = ""
+    # The language model's context, in tokens.
+    llm_context: int = 8192
+    # One of `SERVER_RUNTIMES`, reached at `runtime_url` on the server only.
+    runtime: str = "ollama"
+    runtime_url: str = "http://127.0.0.1:11434"
+    # The NUC's tier 2 embedding model: the int8 ONNX file of
+    # all-MiniLM-L6-v2, relative to the repository root, with its
+    # `tokenizer.json` beside it (IS-17).
+    embedding_model: str = "models/embedding/all-MiniLM-L6-v2/model_int8.onnx"
+
+    @property
+    def token_path(self) -> Path:
+        """The absolute path of the token file."""
+        return resolve_repo_path(self.token_file)
+
+    @property
+    def embedding_path(self) -> Path:
+        """The absolute path of the embedding model."""
+        return resolve_repo_path(self.embedding_model)
+
+    @property
+    def host(self) -> str:
+        """The host part of `url`."""
+        return urlsplit(self.url).hostname or ""
+
+    @property
+    def port(self) -> int:
+        """The port of `url`: the one the server binds."""
+        return urlsplit(self.url).port or 0
 
 
 @dataclass(frozen=True)
@@ -386,6 +562,7 @@ class Config:
     # every agent it does not define.
     agents: tuple[AgentConfig, ...] = DEFAULT_AGENTS
     words: WordsConfig = WordsConfig()
+    server: ServerConfig = ServerConfig()
     # The file the configuration was loaded from; None when built from a mapping.
     path: Path | None = None
 
@@ -457,6 +634,7 @@ def parse_config(data: Mapping[str, object], path: Path | None = None) -> Config
             "gcp",
             "agents",
             "words",
+            "server",
         ),
     )
 
@@ -509,6 +687,7 @@ def parse_config(data: Mapping[str, object], path: Path | None = None) -> Config
         gcp=_gcp(data),
         agents=_agents(data),
         words=_words(data),
+        server=_server(data),
         path=path,
     )
 
@@ -525,6 +704,13 @@ def region_complaint(text: str) -> str | None:
     if _REGION.fullmatch(text):
         return None
     return "a region looks like us-east5"
+
+
+def location_complaint(text: str) -> str | None:
+    """Why `text` is not a Vertex AI location (`global` or a region); None when it is one."""
+    if text == GLOBAL_LOCATION or _REGION.fullmatch(text):
+        return None
+    return "a location is global, or a region such as us-east5"
 
 
 def model_complaint(text: str) -> str | None:
@@ -547,6 +733,7 @@ def _gcp(data: Mapping[str, object]) -> GcpConfig:
             "credentials_file",
             "gemini_api",
             "gemini_model",
+            "gemini_location",
             "buckets",
             "quotas",
         ),
@@ -576,6 +763,14 @@ def _gcp(data: Mapping[str, object]) -> GcpConfig:
         raise ConfigError(
             f"[gcp] gemini_model = {gemini_model!r} is not valid: {complaint}"
         )
+    gemini_location = _str(
+        table, "gcp", "gemini_location", default=GcpConfig.gemini_location
+    ).strip()
+    complaint = location_complaint(gemini_location)
+    if complaint:
+        raise ConfigError(
+            f"[gcp] gemini_location = {gemini_location!r} is not valid: {complaint}"
+        )
     return GcpConfig(
         project=project,
         region=region,
@@ -589,6 +784,7 @@ def _gcp(data: Mapping[str, object]) -> GcpConfig:
         ),
         gemini_api=gemini_api,
         gemini_model=gemini_model,
+        gemini_location=gemini_location,
         buckets=_buckets(table),
         quotas=_quotas(table),
     )
@@ -649,7 +845,7 @@ def _routes(data: Mapping[str, object]) -> tuple[RouteConfig, ...]:
         where = f"routes #{number}"
         if not isinstance(item, dict):
             raise ConfigError(f"[[routes]] entry #{number} must be a table")
-        _reject_unknown(item, where, ("command", "agent", "mode"))
+        _reject_unknown(item, where, ("command", "agent", "mode", "examples"))
         agent = _str(item, where, "agent", non_empty=True)
         if agent not in ROUTE_AGENTS:
             raise ConfigError(
@@ -660,6 +856,7 @@ def _routes(data: Mapping[str, object]) -> tuple[RouteConfig, ...]:
                 command=_str(item, where, "command", non_empty=True).strip(),
                 agent=agent,
                 mode=_str(item, where, "mode", default="").strip(),
+                examples=_examples(item, where),
             )
         )
     commands = [" ".join(entry.command.lower().split()) for entry in entries]
@@ -669,6 +866,22 @@ def _routes(data: Mapping[str, object]) -> tuple[RouteConfig, ...]:
                 f"[[routes]] command {command!r} is configured more than once"
             )
     return tuple(entries)
+
+
+def _examples(item: Mapping[str, object], where: str) -> tuple[str, ...]:
+    """A rule's `examples`: phrases, tidied to single spaces; none when absent."""
+    raw = item.get("examples", [])
+    if not isinstance(raw, list) or not all(
+        isinstance(phrase, str) and phrase.strip() for phrase in raw
+    ):
+        raise ConfigError(f"[{where}] examples must be a list of phrases")
+    phrases = tuple(" ".join(str(phrase).split()) for phrase in raw)
+    seen: set[str] = set()
+    for phrase in phrases:
+        if phrase.lower() in seen:
+            raise ConfigError(f"[{where}] examples lists {phrase!r} more than once")
+        seen.add(phrase.lower())
+    return phrases
 
 
 def _agents(data: Mapping[str, object]) -> tuple[AgentConfig, ...]:
@@ -708,6 +921,11 @@ def _agents(data: Mapping[str, object]) -> tuple[AgentConfig, ...]:
                 f"[{where}] secret = {secret!r} is not valid: a secret's name is "
                 "letters, digits, hyphens and underscores"
             )
+        model = _str(item, where, "model", default=default.model).strip()
+        if model not in AGENT_MODELS:
+            raise ConfigError(
+                f"[{where}] model = {model!r} is not one of: {', '.join(AGENT_MODELS)}"
+            )
         entries.append(
             AgentConfig(
                 name=name,
@@ -736,6 +954,14 @@ def _agents(data: Mapping[str, object]) -> tuple[AgentConfig, ...]:
                     non_empty=True,
                 ).strip(),
                 listening=_bool(item, where, "listening", default=default.listening),
+                model=model,
+                fallback=_fallback(item, where, default.fallback),
+                parameters=(
+                    _parameters(item["parameters"], where, "agents.parameters")
+                    if "parameters" in item
+                    else default.parameters
+                ),
+                tools=_tools(item, where, default.tools),
                 zip_code=zip_code,
                 daily_limit=_positive_int(
                     item, where, "daily_limit", default=default.daily_limit
@@ -755,6 +981,259 @@ def _agents(data: Mapping[str, object]) -> tuple[AgentConfig, ...]:
         *entries,
         *(definition for definition in DEFAULT_AGENTS if definition.name not in named),
     )
+
+
+def _fallback(
+    item: Mapping[str, object], where: str, default: tuple[str, ...]
+) -> tuple[str, ...]:
+    """An agent's `fallback`: models, and a spoken line last only (IS-18)."""
+    raw = item.get("fallback", list(default))
+    if not isinstance(raw, list) or not all(
+        isinstance(entry, str) and entry.strip() for entry in raw
+    ):
+        raise ConfigError(
+            f"[{where}] fallback must be a list of models and, last, a spoken line"
+        )
+    entries = tuple(" ".join(str(entry).split()) for entry in raw)
+    for position, entry in enumerate(entries[:-1], start=1):
+        if entry not in AGENT_MODELS:
+            raise ConfigError(
+                f"[{where}] fallback entry #{position} {entry!r} is not one of: "
+                f"{', '.join(AGENT_MODELS)}; a spoken line can only be last"
+            )
+    return entries
+
+
+def _parameters(raw: object, where: str, table: str) -> tuple[ParameterConfig, ...]:
+    """The `[[<table>]]` slots of an agent or a tool (IS-18)."""
+    if not isinstance(raw, list):
+        raise ConfigError(f"[{where}] [[{table}]] must be one or more tables")
+    entries: list[ParameterConfig] = []
+    for number, slot in enumerate(raw, start=1):
+        at = f"{where} {table} #{number}"
+        if not isinstance(slot, dict):
+            raise ConfigError(f"[{where}] [[{table}]] entry #{number} must be a table")
+        _reject_unknown(slot, at, ("name", "type", "values", "required"))
+        name = _str(slot, at, "name", non_empty=True).strip()
+        if not _SLOT_NAME.fullmatch(name):
+            raise ConfigError(
+                f"[{at}] name = {name!r} is not valid: a name is lower-case "
+                "letters, digits and underscores"
+            )
+        if any(entry.name == name for entry in entries):
+            raise ConfigError(
+                f"[{where}] [[{table}]] {name!r} is defined more than once"
+            )
+        kind = _str(slot, at, "type", default=ParameterConfig.type).strip()
+        if kind not in PARAMETER_TYPES:
+            raise ConfigError(
+                f"[{at}] type = {kind!r} is not one of: {', '.join(PARAMETER_TYPES)}"
+            )
+        values = slot.get("values", [])
+        if not isinstance(values, list) or not all(
+            _of_type(value, kind) for value in values
+        ):
+            raise ConfigError(f"[{at}] values must be a list of {kind} values")
+        entries.append(
+            ParameterConfig(
+                name=name,
+                type=kind,
+                values=tuple(values),
+                required=_bool(slot, at, "required", default=False),
+            )
+        )
+    return tuple(entries)
+
+
+def _of_type(value: object, kind: str) -> bool:
+    """Whether `value` is a value of the parameter type `kind`."""
+    if kind == "boolean":
+        return isinstance(value, bool)
+    if isinstance(value, bool):
+        return False
+    if kind == "integer":
+        return isinstance(value, int)
+    if kind == "number":
+        return isinstance(value, int | float)
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _tools(
+    item: Mapping[str, object], where: str, default: tuple[ToolConfig, ...]
+) -> tuple[ToolConfig, ...]:
+    """An agent's `[[agents.tools]]` (IS-21); its default when absent."""
+    if "tools" not in item:
+        return default
+    raw = item["tools"]
+    if not isinstance(raw, list):
+        raise ConfigError(f"[{where}] [[agents.tools]] must be one or more tables")
+    entries: list[ToolConfig] = []
+    for number, tool in enumerate(raw, start=1):
+        at = f"{where} tools #{number}"
+        if not isinstance(tool, dict):
+            raise ConfigError(
+                f"[{where}] [[agents.tools]] entry #{number} must be a table"
+            )
+        _reject_unknown(tool, at, ("name", "description", "parameters"))
+        name = _str(tool, at, "name", non_empty=True).strip()
+        if not _SLOT_NAME.fullmatch(name):
+            raise ConfigError(
+                f"[{at}] name = {name!r} is not valid: a name is lower-case "
+                "letters, digits and underscores"
+            )
+        if any(entry.name == name for entry in entries):
+            raise ConfigError(
+                f"[{where}] [[agents.tools]] {name!r} is defined more than once"
+            )
+        entries.append(
+            ToolConfig(
+                name=name,
+                description=_str(tool, at, "description", default="").strip(),
+                parameters=_parameters(
+                    tool.get("parameters", []), at, "agents.tools.parameters"
+                ),
+            )
+        )
+    return tuple(entries)
+
+
+# The `[server]` keys that are a number of seconds above zero.
+_SERVER_SECONDS = (
+    "health_timeout",
+    "stt_timeout_base",
+    "stt_timeout_per_second",
+    "route_timeout",
+    "chat_first_token_timeout",
+    "chat_timeout",
+    "poll_up_seconds",
+    "poll_down_min_seconds",
+    "poll_down_max_seconds",
+    "core_listen_seconds",
+)
+# The `[server]` keys that are a confidence, above 0 and at most 1.
+_SERVER_THRESHOLDS = ("tier2_threshold", "tier3_threshold")
+# The `[server]` keys that are a positive whole number.
+_SERVER_COUNTS = ("hint_chars", "tool_rounds", "llm_context")
+# The `[server]` keys that are a string.
+_SERVER_STRINGS = (
+    "url",
+    "token_file",
+    "hostname",
+    "stt_model",
+    "stt_compute_type",
+    "llm_model",
+    "runtime",
+    "runtime_url",
+    "embedding_model",
+)
+
+
+def _server(data: Mapping[str, object]) -> ServerConfig:
+    """The `[server]` table (IS-3); every key its default when absent."""
+    table = _table(data, "server", required=False)
+    _reject_unknown(
+        table,
+        "server",
+        (
+            "enabled",
+            "stt_enabled",
+            *_SERVER_STRINGS,
+            *_SERVER_SECONDS,
+            *_SERVER_THRESHOLDS,
+            *_SERVER_COUNTS,
+        ),
+    )
+    defaults = ServerConfig()
+    strings = {
+        key: _str(
+            table,
+            "server",
+            key,
+            default=getattr(defaults, key),
+            non_empty=key != "llm_model",
+        ).strip()
+        for key in _SERVER_STRINGS
+    }
+    for key in ("url", "runtime_url"):
+        complaint = url_complaint(strings[key])
+        if complaint:
+            raise ConfigError(
+                f"[server] {key} = {strings[key]!r} is not valid: {complaint}"
+            )
+    if strings["stt_compute_type"] not in STT_COMPUTE_TYPES:
+        raise ConfigError(
+            f"[server] stt_compute_type = {strings['stt_compute_type']!r} is not "
+            f"one of: {', '.join(STT_COMPUTE_TYPES)}"
+        )
+    if strings["runtime"] not in SERVER_RUNTIMES:
+        raise ConfigError(
+            f"[server] runtime = {strings['runtime']!r} is not one of: "
+            f"{', '.join(SERVER_RUNTIMES)}"
+        )
+    seconds = {
+        key: _positive_number(table, "server", key, default=getattr(defaults, key))
+        for key in _SERVER_SECONDS
+    }
+    if seconds["poll_down_max_seconds"] < seconds["poll_down_min_seconds"]:
+        raise ConfigError(
+            "[server] poll_down_max_seconds must not be below poll_down_min_seconds"
+        )
+    thresholds: dict[str, float] = {}
+    for key in _SERVER_THRESHOLDS:
+        value = _positive_number(table, "server", key, default=getattr(defaults, key))
+        if value > 1.0:
+            raise ConfigError(f"[server] {key} = {value} must be above 0 and at most 1")
+        thresholds[key] = value
+    counts = {
+        key: _positive_int(table, "server", key, default=getattr(defaults, key))
+        for key in _SERVER_COUNTS
+    }
+    return ServerConfig(
+        enabled=_bool(table, "server", "enabled", default=defaults.enabled),
+        stt_enabled=_bool(table, "server", "stt_enabled", default=defaults.stt_enabled),
+        url=strings["url"],
+        token_file=strings["token_file"],
+        hostname=strings["hostname"],
+        health_timeout=seconds["health_timeout"],
+        stt_timeout_base=seconds["stt_timeout_base"],
+        stt_timeout_per_second=seconds["stt_timeout_per_second"],
+        route_timeout=seconds["route_timeout"],
+        chat_first_token_timeout=seconds["chat_first_token_timeout"],
+        chat_timeout=seconds["chat_timeout"],
+        poll_up_seconds=seconds["poll_up_seconds"],
+        poll_down_min_seconds=seconds["poll_down_min_seconds"],
+        poll_down_max_seconds=seconds["poll_down_max_seconds"],
+        tier2_threshold=thresholds["tier2_threshold"],
+        tier3_threshold=thresholds["tier3_threshold"],
+        hint_chars=counts["hint_chars"],
+        tool_rounds=counts["tool_rounds"],
+        core_listen_seconds=seconds["core_listen_seconds"],
+        stt_model=strings["stt_model"],
+        stt_compute_type=strings["stt_compute_type"],
+        llm_model=strings["llm_model"],
+        llm_context=counts["llm_context"],
+        runtime=strings["runtime"],
+        runtime_url=strings["runtime_url"],
+        embedding_model=strings["embedding_model"],
+    )
+
+
+def url_complaint(text: str) -> str | None:
+    """Why `text` is not an `http://host:port` address; None when it is one."""
+    parts = urlsplit(text)
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    if (
+        parts.scheme == "http"
+        and parts.hostname
+        and port
+        and parts.path in ("", "/")
+        and not (parts.query or parts.fragment or parts.username)
+    ):
+        return None
+    return "an address looks like http://192.168.86.53:8300"
 
 
 def _words(data: Mapping[str, object]) -> WordsConfig:
@@ -885,6 +1364,15 @@ def _positive_int(
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ConfigError(f"[{where}] {key} must be a positive whole number")
     return value
+
+
+def _positive_number(
+    table: Mapping[str, object], where: str, key: str, *, default: float
+) -> float:
+    value = table.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
+        raise ConfigError(f"[{where}] {key} must be a number above zero")
+    return float(value)
 
 
 def _device(table: Mapping[str, object], key: str) -> DeviceSpec:

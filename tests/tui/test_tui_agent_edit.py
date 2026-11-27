@@ -7,9 +7,16 @@ from tui_fakes import CONFIG_TEXT
 
 from autobot.agents.registry import AGENTS
 from autobot.agents.tree import build_tree
-from autobot.config import Config, parse_config
+from autobot.config import (
+    AgentConfig,
+    Config,
+    ParameterConfig,
+    ToolConfig,
+    parse_config,
+)
 from autobot.tui.agent_edit import (
     COMMANDS_NOTE,
+    LIST,
     MULTI_LINE,
     READ_ONLY,
     SECRET,
@@ -22,7 +29,10 @@ from autobot.tui.agent_edit import (
     commands_text,
     fields,
     limit_complaint,
+    parameters_text,
+    split_list,
     table_index,
+    tools_text,
     zip_code_complaint,
 )
 from autobot.tui.config_edit import Change
@@ -96,9 +106,10 @@ def test_the_selection_stops_at_the_ends_of_a_level_and_of_the_tree() -> None:
     assert selection.current.name == "question"
     for _ in range(9):
         selection.right()
-    assert selection.current.name == "echo"
+    # The core agent stands last: the default of the level (IS-19).
+    assert selection.current.name == "core"
     selection.left()
-    assert selection.current.name == "introduce"
+    assert selection.current.name == "echo"
 
 
 def test_a_selection_keeps_its_place_on_a_tree_built_again() -> None:
@@ -109,7 +120,7 @@ def test_a_selection_keeps_its_place_on_a_tree_built_again() -> None:
     again = Selection(tree, selection.level, selection.column)
     assert again.current.name == "weather"
     # A place the tree no longer has is the nearest it does have.
-    assert Selection(tree, 7, 99).current.name == "echo"
+    assert Selection(tree, 7, 99).current.name == "core"
 
 
 # --- the fields -----------------------------------------------------------------
@@ -121,6 +132,10 @@ def test_the_weather_agents_fields_end_in_its_own_settings() -> None:
         "Description",
         "Commands",
         "Language model",
+        "Model",
+        "Fallback",
+        "Parameters",
+        "Tools",
         "Confirm on the way in",
         "Question",
         "Confirm before a request",
@@ -153,6 +168,10 @@ def test_the_request_confirmation_is_offered_only_to_an_agent_that_sends_request
         "Description",
         "Commands",
         "Language model",
+        "Model",
+        "Fallback",
+        "Parameters",
+        "Tools",
         "Confirm on the way in",
         "Question",
         "Listening",
@@ -365,3 +384,62 @@ def test_the_window_follows_the_cursor() -> None:
         area.move_up()
     assert area.window(3, 12)[0] == "line 0 xxxxx"
     assert (area.top, area.left) == (0, 0)
+
+
+# --- the model, the fallback, the parameters and the tools (IS-18, IS-21) ----------
+
+
+def test_the_model_is_a_text_field_that_takes_one_of_the_three() -> None:
+    model = field("question", "Model")
+    assert (model.kind, model.key, model.value) == (TEXT, "model", "gemini")
+    assert model.complaint("local") is None and model.complaint(" none ") is None
+    assert model.complaint("gpt") == "type one of: none, local, gemini"
+    assert model.change("local") == Change("agents", "model", "local", model.index)
+    assert field("time", "Model").value == "none"
+
+
+def test_the_fallback_is_typed_on_one_line_and_written_as_a_list() -> None:
+    core = AgentConfig(
+        name="core", model="local", fallback=("gemini", "the server is away")
+    )
+    rows = fields(AGENTS["question"], core, 6)
+    fallback = next(row for row in rows if row.label == "Fallback")
+    assert (fallback.kind, fallback.key) == (LIST, "fallback")
+    assert fallback.text == "gemini; the server is away"
+    assert fallback.editable
+    assert fallback.hint == "Enter changes [[agents]] fallback (entries with ; between)"
+    assert fallback.change(" local ;  gemini; I   cannot answer now ") == Change(
+        "agents", "fallback", ["local", "gemini", "I cannot answer now"], 6
+    )
+    assert fallback.change("") == Change("agents", "fallback", [], 6)
+    assert fallback.complaint("gemini; local") is None
+    assert fallback.complaint("the server is away") is None
+    assert fallback.complaint("the server is away; gemini") == (
+        "'the server is away' is not one of: none, local, gemini; "
+        "a spoken line can only be last"
+    )
+    assert split_list(" a ;; b c ;") == ["a", "b c"]
+
+
+def test_the_parameters_and_tools_are_shown_and_edited_in_the_file() -> None:
+    slots = (
+        ParameterConfig(name="day", values=("today", "tomorrow")),
+        ParameterConfig(name="minutes", type="integer", required=True),
+    )
+    tools = (
+        ToolConfig(name="set_timer", parameters=slots[1:]),
+        ToolConfig(name="stop_timer"),
+    )
+    definition = AgentConfig(name="weather", parameters=slots, tools=tools)
+    rows = {row.label: row for row in fields(AGENTS["weather"], definition, 2)}
+    assert rows["Parameters"].kind == READ_ONLY and not rows["Parameters"].editable
+    assert rows["Parameters"].text == (
+        "day (string: today, tomorrow); minutes (integer)*"
+    )
+    assert rows["Tools"].text == "set_timer(minutes (integer)*); stop_timer"
+    assert rows["Parameters"].hint == (
+        "edited in config/autobot.toml, as [[agents.parameters]] tables"
+    )
+    assert "[[agents.tools]]" in rows["Tools"].hint
+    assert parameters_text(()) == "(none)" and tools_text(()) == "(none)"
+    assert field("time", "Parameters").text == "(none)"

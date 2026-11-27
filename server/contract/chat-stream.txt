@@ -1,0 +1,18 @@
+event: token
+data: {"text": "It's"}
+
+event: token
+data: {"text": " a quarter"}
+
+event: token
+data: {"text": " past three."}
+
+event: token
+data: {"text": " Anything"}
+
+event: token
+data: {"text": " else?"}
+
+event: done
+data: {"model": "qwen3:8b", "tokens": {"prompt": 212, "completion": 9}}
+

@@ -2,9 +2,14 @@
 
 The wake phrase only wakes autobot; the command said after it is routed by
 the `[[routes]]` rules of `config/autobot.toml` (`autobot.routing`). This
-screen lists them in the order they are tried, edits a rule's command, and
-tries a typed sentence against them, as the face would route it. Every
-change is written to the config file (TS-10).
+screen lists them in the order they are tried, edits a rule's command and
+its example phrases, and tries a typed sentence against them, as the face
+would route it. Every change is written to the config file (TS-10).
+
+A rule's `examples` are phrases that mean what its command means. They are
+what the routing cascade's second tier compares a sentence with when no
+command stands in it (IS-17, `autobot.cascade`). The sentence tried here is
+tried against the keyword rules only, which is tier 1.
 """
 
 from __future__ import annotations
@@ -21,7 +26,15 @@ from autobot.tui.ui import Canvas, Rect, fit
 
 TABLE = "routes"
 NOT_TRIED = "(type a sentence to see where it goes)"
+# What separates the example phrases in the one line they are typed on.
+EXAMPLE_SEPARATOR = ";"
 NO_MATCH = "no rule matches: autobot keeps listening"
+
+
+def split_examples(text: str) -> list[str]:
+    """The phrases of one typed line, spaces squeezed, empty ones dropped."""
+    phrases = (" ".join(part.split()) for part in text.split(EXAMPLE_SEPARATOR))
+    return [phrase for phrase in phrases if phrase]
 
 
 class RoutingScreen(MenuView):
@@ -60,6 +73,41 @@ class RoutingScreen(MenuView):
         )
         if typed is not None:
             self.app.save(Change(TABLE, "command", " ".join(typed.split()), index))
+
+    def edit_examples(self) -> None:
+        """Ask which rule, then its example phrases on one line, and write them."""
+        routes = self.app.config.routes
+        if not routes:
+            self.app.error("there is no rule to give examples to")
+            return
+
+        def which(text: str) -> str | None:
+            if not text.strip().isdigit() or not 1 <= int(text) <= len(routes):
+                return f"type a rule's number, from 1 to {len(routes)}"
+            return None
+
+        chosen = self.app.prompt(
+            "Example phrases", "The number of the rule:", "1", which
+        )
+        if chosen is None:
+            return
+        index = int(chosen) - 1
+        route = routes[index]
+
+        def complaint(text: str) -> str | None:
+            phrases = [normalise(phrase) for phrase in split_examples(text)]
+            if len(set(phrases)) != len(phrases):
+                return "a phrase is there twice"
+            return None
+
+        typed = self.app.prompt(
+            f'Rule {index + 1}: "{route.command}" -> {route.agent} agent',
+            f"Phrases that mean the same, with {EXAMPLE_SEPARATOR} between them:",
+            f"{EXAMPLE_SEPARATOR} ".join(route.examples),
+            complaint,
+        )
+        if typed is not None:
+            self.app.save(Change(TABLE, "examples", split_examples(typed), index))
 
     def try_sentence(self) -> None:
         typed = self.app.prompt(
@@ -100,7 +148,8 @@ class RoutingScreen(MenuView):
         items = [
             MenuItem(
                 f'Rule {index + 1}: "{route.command}" -> {route.agent} agent'
-                + (f" ({route.mode})" if route.mode else ""),
+                + (f" ({route.mode})" if route.mode else "")
+                + (f", {len(route.examples)} examples" if route.examples else ""),
                 partial(self.edit_command, index),
                 " ".join(
                     ["The", route.agent, "agent", AGENT_NOTES.get(route.agent, "")]
@@ -114,6 +163,14 @@ class RoutingScreen(MenuView):
                 "Try a sentence...",
                 self.try_sentence,
                 "Type what you would say after the wake phrase; see which rule takes it",
+            )
+        )
+        items.append(
+            MenuItem(
+                "Example phrases of a rule...",
+                self.edit_examples,
+                "Phrases that mean what a rule's command means, for sentences "
+                "with no command in them",
             )
         )
         items.append(MenuItem("Back", self.app.pop, "Return to the main menu"))

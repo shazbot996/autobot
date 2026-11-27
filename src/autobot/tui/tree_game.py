@@ -61,6 +61,9 @@ class Position:
     node: str = ""
     # One of `PHASES`.
     phase: str = PHASE_LISTENING
+    # The tier of the routing cascade that decided the command (IS-17):
+    # 1, 2 or 3; 0 while none has, and for the core agent, which no tier chose.
+    tier: int = 0
 
 
 class Game:
@@ -120,6 +123,13 @@ class Game:
         if self._target is None or not self.arrived(now):
             return ""
         return self._target.name
+
+    def tier_mark(self) -> str:
+        """The mark on the edge into the node the command reached: `tier 2`; else empty."""
+        position = self.position
+        if not position.tier or not position.node or position.phase == PHASE_DONE:
+            return ""
+        return f"tier {position.tier}"
 
     def level_view(self, now: float) -> bool:
         """Whether the face shows the agent's running view instead of the map.

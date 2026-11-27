@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+# The GPU inference server on GAMEON1 (IS-12): a package of its own, so that
+# the NUC never installs its GPU dependencies and the server never installs
+# the NUC's audio and cloud ones. It does not import `autobot`.
+[project]
+name = "autobot-server"
+version = "0.1.0"
+description = "autobot's GPU inference server on GAMEON1: speech-to-text, routing and chat for the NUC over the LAN."
+requires-python = ">=3.12"
+# The server itself is the standard library: `http.server`, `tomllib`, `hmac`.
+dependencies = []
+
+[project.optional-dependencies]
+# Only GAMEON1 installs these (`make server-setup`): faster-whisper on CUDA 12
+# with cuBLAS and cuDNN 9 from pip wheels, without a CUDA toolkit (IS-10).
+# Every model is loaded from a local path; nothing here reaches a cloud
+# service (IS-7, CN-1, CN-2).
+gpu = [
+    "faster-whisper>=1.1",
+    "nvidia-cublas-cu12",
+    "nvidia-cudnn-cu12>=9",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

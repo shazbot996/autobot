@@ -22,7 +22,7 @@ from autobot.agents.gemini import (
     Model,
     ModelError,
 )
-from autobot.config import GEMINI_DEVELOPER_API, Config, parse_config
+from autobot.config import GEMINI_DEVELOPER_API, Config, ConfigError, parse_config
 from autobot.gcp.client import GcpError
 
 MODEL = "gemini-2.5-flash"
@@ -159,7 +159,12 @@ def test_an_answer_comes_back_and_the_environment_is_set_from_gcp(
     tmp_path: Path, adk: FakeAdk
 ) -> None:
     connect = FakeConnect()
-    chosen = config(gemini_model=MODEL, project="some-project", region="europe-west4")
+    chosen = config(
+        gemini_model=MODEL,
+        project="some-project",
+        region="europe-west4",
+        gemini_location="europe-west4",
+    )
     assert AdkModel(chosen, tmp_path, connect).ask(PROMPT, QUERY) == ANSWER
     assert connect.calls == [(chosen, tmp_path)]
     # Only the model's id and the two texts go to the ADK.
@@ -167,6 +172,47 @@ def test_an_answer_comes_back_and_the_environment_is_set_from_gcp(
     assert os.environ[gemini.USE_VERTEX_AI_ENV_VAR] == "TRUE"
     assert os.environ[gemini.PROJECT_ENV_VAR] == "some-project"
     assert os.environ[gemini.LOCATION_ENV_VAR] == "europe-west4"
+
+
+def test_the_model_is_asked_at_global_unless_a_location_is_set(
+    tmp_path: Path, adk: FakeAdk
+) -> None:
+    # The newer Gemini models are served only at `global`, not in the region
+    # the quotas are compared in.
+    chosen = config(gemini_model=MODEL, region="us-east5")
+    assert chosen.gcp.gemini_location == "global"
+    AdkModel(chosen, tmp_path, FakeConnect()).ask(PROMPT, QUERY)
+    assert os.environ[gemini.LOCATION_ENV_VAR] == "global"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ModelError(
+            "Gemini refused: 404 NOT_FOUND. {'error': {'code': 404, 'message': "
+            "'Publisher model ... was not found or your project does not have "
+            "access to it'}}"
+        ),
+        RuntimeError("404 NOT_FOUND. Publisher model was not found"),
+    ],
+)
+def test_a_model_not_served_there_says_which_setting_to_change(
+    tmp_path: Path, adk: FakeAdk, error: Exception
+) -> None:
+    adk.error = error
+    chosen = config(gemini_model=MODEL, gemini_location="us-east5")
+    with pytest.raises(ModelError) as raised:
+        AdkModel(chosen, tmp_path, FakeConnect()).ask(PROMPT, QUERY)
+    message = str(raised.value)
+    assert f"no model {MODEL} at location us-east5" in message
+    assert "[gcp] gemini_location" in message
+    assert "\n" not in message
+
+
+def test_a_location_must_be_global_or_a_region() -> None:
+    assert config(gemini_location="us-central1").gcp.gemini_location == "us-central1"
+    with pytest.raises(ConfigError, match="gemini_location"):
+        config(gemini_location="the moon")
 
 
 def test_a_failure_of_the_adk_is_one_short_line(tmp_path: Path, adk: FakeAdk) -> None:

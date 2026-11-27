@@ -1,0 +1,8 @@
+{
+  "agent": "weather",
+  "mode": "",
+  "confidence": 0.86,
+  "parameters": {
+    "day": "today"
+  }
+}

@@ -1,0 +1,45 @@
+# autobot GPU inference server: systemd user unit (template), for GAMEON1.
+#
+# This file is a template. `@REPO_ROOT@` stands for the absolute path of the
+# repository checkout; `make server-install`
+# (`python -m autobot_server.control install`) substitutes it, writes the
+# result to ~/.config/systemd/user/autobot-server.service, enables it and
+# turns lingering on. Do not copy it by hand.
+#
+# Once installed, `make server-up`, `make server-down` and `make server-status`
+# drive this unit. It starts when the WSL distribution starts, with nobody
+# logged in, because the user has lingering on (IS-14). The Windows scheduled
+# task that starts WSL at boot is the owner's (docs/context/INFRASTRUCTURE.md).
+
+[Unit]
+Description=autobot GPU inference server
+Documentation=file://@REPO_ROOT@/docs/specs/active/autobot-gpu-inference-server-SPEC.md
+# The language model's runtime, when Ollama is installed as a system service.
+# The server starts without it, and reports routing and chat not ready until
+# it answers (IS-11).
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=@REPO_ROOT@
+ExecStart=@REPO_ROOT@/.venv-server/bin/python -m autobot_server
+Environment=PYTHONUNBUFFERED=1
+# The speech libraries stay off the network: the server sets these itself as
+# well, before it imports them (IS-7).
+Environment=HF_HUB_OFFLINE=1
+Environment=ORT_DISABLE_TELEMETRY=1
+# The same log `make server-up` writes without the unit, so `make server-logs`
+# is one command.
+StandardOutput=append:@REPO_ROOT@/run/server.log
+StandardError=inherit
+# Exit status 1 is a fault that may pass (the port was still held): try
+# again. Status 2 will not pass (configuration, the token, the wrong host,
+# the VRAM budget): stay down until someone fixes it. A model that fails to
+# load, or a GPU taken by a game, never ends the process (IS-24).
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus=2
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target

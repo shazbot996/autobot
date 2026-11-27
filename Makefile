@@ -13,17 +13,27 @@ SHELL := /bin/bash
 VENV   := .venv
 PYTHON := $(VENV)/bin/python
 
+# The inference server's own environment, on GAMEON1 only (IS-25).
+SERVER_VENV   := .venv-server
+SERVER_PYTHON := $(SERVER_VENV)/bin/python
+
 # Fails with one line when `make setup` has not been run.
 .PHONY: venv-check
 venv-check:
 	@test -x $(PYTHON) || { echo "no $(VENV): run 'make setup' first" >&2; exit 1; }
+
+# Fails with one line off GAMEON1, and when `make server-setup` has not been run.
+.PHONY: server-venv-check
+server-venv-check:
+	@PYTHONPATH=server/src python3 -m autobot_server.hostcheck
+	@test -x $(SERVER_PYTHON) || { echo "no $(SERVER_VENV): run 'make server-setup' first" >&2; exit 1; }
 
 # --- help -------------------------------------------------------------------
 .PHONY: help
 help: ## Print this summary of the available commands
 	@echo "autobot: make targets"
 	@grep -hE '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) \
-		| awk -F ':.*## ' '{ printf "  %-15s %s\n", $$1, $$2 }'
+		| awk -F ':.*## ' '{ printf "  %-20s %s\n", $$1, $$2 }'
 	@echo "\`make launch\` opens the application: the full-screen terminal user interface."
 
 # --- setup ------------------------------------------------------------------
@@ -32,6 +42,9 @@ setup: ## Create .venv and install autobot with its dev extras
 	@test -x $(PYTHON) || python3 -m venv $(VENV)
 	$(PYTHON) -m pip install --quiet --upgrade pip
 	$(PYTHON) -m pip install --quiet --editable '.[dev]'
+	# The inference server's package, without its `gpu` extra: on the NUC it
+	# is only linted, type-checked and tested, on fakes (IS-12).
+	$(PYTHON) -m pip install --quiet --editable ./server
 
 # --- test -------------------------------------------------------------------
 .PHONY: test
@@ -131,3 +144,84 @@ train-wakeword: venv-check ## Train a wake-word candidate for the interface to i
 	@$(PYTHON) -m autobot.fetch_models --training --acav-gb $(ACAV_GB)
 	@$(PYTHON) -m autobot.wakeword.train --scale $(SCALE) --steps $(STEPS) \
 		--threads $(THREADS) $(if $(PHRASE),--phrase "$(PHRASE)") $(TRAIN_ARGS)
+
+# --- the inference server (GAMEON1) -------------------------------------------
+# The targets below run on GAMEON1, the GPU inference server, inside its WSL
+# distribution; each refuses on any other host (IS-25). `server-ping` is the
+# NUC's, and `server-token` runs on both. The Windows, router and `apt` steps
+# that come first are the owner's: docs/context/INFRASTRUCTURE.md lists them.
+
+# --- server-setup -----------------------------------------------------------
+.PHONY: server-setup
+server-setup: ## GAMEON1: create .venv-server and install the server with its GPU extras
+	@PYTHONPATH=server/src python3 -m autobot_server.hostcheck
+	@test -x $(SERVER_PYTHON) || python3 -m venv $(SERVER_VENV)
+	$(SERVER_PYTHON) -m pip install --quiet --upgrade pip
+	$(SERVER_PYTHON) -m pip install --quiet --editable './server[gpu]'
+
+# --- server-fetch-models ----------------------------------------------------
+# The only target that downloads on GAMEON1. It fetches the speech-to-text
+# model and prints the `ollama pull` for the language model, which the owner
+# runs himself.
+.PHONY: server-fetch-models
+server-fetch-models: server-venv-check ## GAMEON1: fetch the speech-to-text model into models/; print the ollama pull to run
+	@$(SERVER_PYTHON) -m autobot_server.fetch_models
+
+# --- server-up --------------------------------------------------------------
+.PHONY: server-up
+server-up: server-venv-check ## GAMEON1: start the inference server (the systemd unit when it is installed)
+	@$(SERVER_PYTHON) -m autobot_server.control up
+
+# --- server-down ------------------------------------------------------------
+.PHONY: server-down
+server-down: server-venv-check ## GAMEON1: stop the inference server
+	@$(SERVER_PYTHON) -m autobot_server.control down
+
+# --- server-status ----------------------------------------------------------
+.PHONY: server-status
+server-status: server-venv-check ## GAMEON1: show whether the server runs and which jobs are ready
+	@$(SERVER_PYTHON) -m autobot_server.control status
+
+# --- server-logs ------------------------------------------------------------
+# `make server-logs` prints the end of run/server.log; FOLLOW=1 follows it.
+.PHONY: server-logs
+server-logs: server-venv-check ## GAMEON1: print the end of the server log (FOLLOW=1 keeps following it)
+	@$(SERVER_PYTHON) -m autobot_server.control logs $(if $(FOLLOW),--follow)
+
+# --- server-install ---------------------------------------------------------
+.PHONY: server-install
+server-install: server-venv-check ## GAMEON1: install the server's systemd user unit, enable it with lingering, start it
+	@$(SERVER_PYTHON) -m autobot_server.control install
+
+# --- server-check -----------------------------------------------------------
+.PHONY: server-check
+server-check: server-venv-check ## GAMEON1: loopback smoke test of /health, /v1/stt, /v1/route and /v1/chat
+	@$(SERVER_PYTHON) -m autobot_server.check
+
+# --- server-eval ------------------------------------------------------------
+# Measures one language model against the real runtime and writes
+# run/server-eval-<model>.json: route accuracy, JSON validity and latency
+# (IS-26). MODEL= names the candidate; the default is [server] llm_model.
+.PHONY: server-eval
+server-eval: server-venv-check ## GAMEON1: measure a language model and write run/server-eval-<model>.json (MODEL=name)
+	@$(SERVER_PYTHON) -m autobot_server.eval $(if $(MODEL),--model "$(MODEL)")
+
+# --- server-token -----------------------------------------------------------
+# The shared bearer token (IS-13). On GAMEON1 it makes the token file, when
+# there is none, and prints its path. On the NUC it asks for the token at a
+# hidden prompt and writes secrets/server-token. Both files are mode 0600 and
+# the token is never printed. The owner runs this himself, on each host, and
+# carries the value between them; nothing copies it over the LAN.
+.PHONY: server-token
+server-token: ## Make the server's token (on GAMEON1) or enter it at a hidden prompt (on the NUC)
+	@if PYTHONPATH=server/src python3 -m autobot_server.hostcheck 2>/dev/null; then \
+		PYTHONPATH=server/src python3 -m autobot_server.token; \
+	else \
+		test -x $(PYTHON) || { echo "no $(VENV): run 'make setup' first" >&2; exit 1; }; \
+		$(PYTHON) -m autobot.server.token; \
+	fi
+
+# --- server-ping ------------------------------------------------------------
+.PHONY: server-ping
+server-ping: venv-check ## NUC: ask the inference server's /health once and print its state
+	@$(PYTHON) -m autobot.server.ping

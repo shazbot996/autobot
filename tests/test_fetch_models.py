@@ -15,6 +15,7 @@ import pytest
 
 from autobot import fetch_models
 from autobot.agents import weather_api
+from autobot.config import ServerConfig
 from autobot.fetch_models import Asset, FetchError
 from autobot.listener.engines.sherpa_kws import SHERPA_KWS_FILES, SHERPA_KWS_MODEL
 
@@ -371,9 +372,22 @@ def test_the_command_names_the_listeners_files(
     assert "  have     models/piper/en_US-joe-medium.onnx.json" in lines
     assert "  have     models/silero/silero_vad.onnx" in lines
     assert "  have     models/sherpa-kws/ (5 files: the sherpa_kws baseline)" in lines
-    assert lines[-1].endswith("(1 fetched now, 8 already there)")
+    assert "  have     models/embedding/all-MiniLM-L6-v2/model_int8.onnx" in lines
+    assert lines[-1].endswith("(1 fetched now, 10 already there)")
     assert (
         "  fetched  models/geo/zcta.tsv (the zip-code centroids: the weather agent)"
         in lines
     )
     assert len(lines) == len(wanted) + 3
+
+
+def test_the_embedding_model_is_fetched_beside_its_tokenizer() -> None:
+    assets = fetch_models.embedding_assets()
+    assert [str(asset.path) for asset in assets] == [
+        "embedding/all-MiniLM-L6-v2/model_int8.onnx",
+        "embedding/all-MiniLM-L6-v2/tokenizer.json",
+    ]
+    # Where `[server] embedding_model` looks for it, by default.
+    assert ServerConfig().embedding_model == f"models/{assets[0].path}"
+    assert all(asset.url.startswith("https://huggingface.co/") for asset in assets)
+    assert all(asset.limit is None for asset in assets)

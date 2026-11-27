@@ -1,0 +1,60 @@
+{"text": "what's the weather", "agent": "weather", "mode": "", "parameters": {}}
+{"text": "how's the weather today", "agent": "weather", "mode": "", "parameters": {"day": "today"}}
+{"text": "is it cold outside right now", "agent": "weather", "mode": "", "parameters": {}}
+{"text": "do I need a jacket today", "agent": "weather", "mode": "", "parameters": {"day": "today"}}
+{"text": "what is it like outside", "agent": "weather", "mode": "", "parameters": {}}
+{"text": "is it raining", "agent": "weather", "mode": "", "parameters": {}}
+{"text": "how hot is it going to get today", "agent": "weather", "mode": "", "parameters": {"day": "today"}}
+{"text": "will I need an umbrella this afternoon", "agent": "weather", "mode": "", "parameters": {"day": "today"}}
+{"text": "what's the weather tomorrow", "agent": "weather", "mode": "", "parameters": {"day": "tomorrow"}}
+{"text": "should I wear a coat tomorrow", "agent": "weather", "mode": "", "parameters": {"day": "tomorrow"}}
+{"text": "give me the forecast", "agent": "weather", "mode": "forecast", "parameters": {}}
+{"text": "what's the forecast for the week", "agent": "weather", "mode": "forecast", "parameters": {}}
+{"text": "what will the weather be over the next few days", "agent": "weather", "mode": "forecast", "parameters": {}}
+{"text": "is it going to rain this weekend", "agent": "weather", "mode": "forecast", "parameters": {}}
+{"text": "how does the rest of the week look outside", "agent": "weather", "mode": "forecast", "parameters": {}}
+{"text": "weather for the days ahead please", "agent": "weather", "mode": "forecast", "parameters": {}}
+{"text": "what time is it", "agent": "time", "mode": "", "parameters": {}}
+{"text": "tell me the time", "agent": "time", "mode": "", "parameters": {}}
+{"text": "do you have the time", "agent": "time", "mode": "", "parameters": {}}
+{"text": "what's the time right now", "agent": "time", "mode": "", "parameters": {}}
+{"text": "how late is it", "agent": "time", "mode": "", "parameters": {}}
+{"text": "what day is it today", "agent": "time", "mode": "", "parameters": {}}
+{"text": "what's today's date", "agent": "time", "mode": "", "parameters": {}}
+{"text": "is it past noon yet", "agent": "time", "mode": "", "parameters": {}}
+{"text": "show me the cameras", "agent": "camera", "mode": "", "parameters": {}}
+{"text": "open the camera view", "agent": "camera", "mode": "", "parameters": {}}
+{"text": "who is at the front door", "agent": "camera", "mode": "", "parameters": {}}
+{"text": "let me see the driveway", "agent": "camera", "mode": "", "parameters": {}}
+{"text": "is anyone outside the house", "agent": "camera", "mode": "", "parameters": {}}
+{"text": "put the outside cameras on the screen", "agent": "camera", "mode": "", "parameters": {}}
+{"text": "I heard a noise, show me the backyard", "agent": "camera", "mode": "", "parameters": {}}
+{"text": "camera", "agent": "camera", "mode": "", "parameters": {}}
+{"text": "introduce yourself", "agent": "introduce", "mode": "", "parameters": {}}
+{"text": "who are you", "agent": "introduce", "mode": "", "parameters": {}}
+{"text": "what can you do", "agent": "introduce", "mode": "", "parameters": {}}
+{"text": "tell me about yourself", "agent": "introduce", "mode": "", "parameters": {}}
+{"text": "how do you work", "agent": "introduce", "mode": "", "parameters": {}}
+{"text": "say hello to our guests and explain what you are", "agent": "introduce", "mode": "", "parameters": {}}
+{"text": "echo", "agent": "echo", "mode": "", "parameters": {}}
+{"text": "record my voice and play it back", "agent": "echo", "mode": "", "parameters": {}}
+{"text": "let me hear how I sound through your microphone", "agent": "echo", "mode": "", "parameters": {}}
+{"text": "do the echo test", "agent": "echo", "mode": "", "parameters": {}}
+{"text": "play back what I say", "agent": "echo", "mode": "", "parameters": {}}
+{"text": "question how far away is the moon", "agent": "question", "mode": "", "parameters": {}}
+{"text": "I have a question, who wrote Moby Dick", "agent": "question", "mode": "", "parameters": {}}
+{"text": "look up how many feet are in a mile", "agent": "question", "mode": "", "parameters": {}}
+{"text": "ask the language model what the capital of Australia is", "agent": "question", "mode": "", "parameters": {}}
+{"text": "can you find out when the Eiffel Tower was built", "agent": "question", "mode": "", "parameters": {}}
+{"text": "question why is the sky blue", "agent": "question", "mode": "", "parameters": {}}
+{"text": "how are you doing today", "agent": "none", "mode": "", "parameters": {}}
+{"text": "good morning", "agent": "none", "mode": "", "parameters": {}}
+{"text": "thank you, that was helpful", "agent": "none", "mode": "", "parameters": {}}
+{"text": "tell me a joke", "agent": "none", "mode": "", "parameters": {}}
+{"text": "turn the kitchen lights on", "agent": "none", "mode": "", "parameters": {}}
+{"text": "play some music", "agent": "none", "mode": "", "parameters": {}}
+{"text": "set a timer for ten minutes", "agent": "none", "mode": "", "parameters": {}}
+{"text": "never mind", "agent": "none", "mode": "", "parameters": {}}
+{"text": "I'm going to bed, good night", "agent": "none", "mode": "", "parameters": {}}
+{"text": "um, hang on a second", "agent": "none", "mode": "", "parameters": {}}
+{"text": "that's a nice shirt you have on", "agent": "none", "mode": "", "parameters": {}}

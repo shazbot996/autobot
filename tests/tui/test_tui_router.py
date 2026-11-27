@@ -2,20 +2,24 @@
 
 import dataclasses
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
 from tui_fakes import CONFIG_TEXT, FakeAudio, FakeRunner, FakeVoice
 
+from agents.agent_fakes import FakeEmbedder
 from autobot.agents.base import Launch
 from autobot.agents.registry import AGENTS
 from autobot.config import parse_config
+from autobot.server.watch import DEGRADED as SERVER_DEGRADED
+from autobot.server.watch import DOWN as SERVER_DOWN
 from autobot.tui.echo import Echo
-from autobot.tui.face import Experience, FaceContext, FaceModel
+from autobot.tui.face import Experience, FaceContext, FaceModel, Seams
 from autobot.tui.face_reactions import ReactionSet, reaction_set
 from autobot.tui.router import (
     CANCELLED,
+    DID_NOT_CATCH,
     LISTEN_SECONDS,
     LISTENING,
     NO_ANSWER,
@@ -30,6 +34,7 @@ from autobot.tui.router import (
 )
 from autobot.tui.runner import FunctionTask
 from autobot.tui.tree_game import Position
+from server.server_fakes import FakeTransport, FakeWatch, client_on
 
 AT = "2026-11-27T07:00:00.000+00:00"
 FRAME = 0.1
@@ -143,6 +148,8 @@ class Rig:
         *,
         config_text: str = CONFIG_TEXT + ECHO_ONLY,
         reactions: ReactionSet | None = None,
+        seams: Seams | None = None,
+        agents: Sequence[str] = (),
     ) -> None:
         self.clock = FakeClock()
         self.agents: list[FakeAgent] = []
@@ -154,9 +161,11 @@ class Rig:
             return made
 
         self.echo = FakeAgentDef("echo", agent)
+        # The other agents a test routes to, each a fake of its own.
+        self.defs = {name: FakeAgentDef(name, agent) for name in agents}
 
         def router() -> Router:
-            made = Router({"echo": self.echo})
+            made = Router({"echo": self.echo, **self.defs})
             self.routers.append(made)
             return made
 
@@ -171,6 +180,7 @@ class Rig:
             models_root=tmp_path,
             hostname="nuc",
             clock=self.clock,
+            seams=seams,
         )
 
     @property
@@ -233,7 +243,7 @@ def test_a_command_among_other_words_starts_its_agent(tmp_path: Path) -> None:
     assert rig.router.match.number == 1
     assert ROUTED.format(agent="echo") in rig.summary
     assert rig.detail[-1] == (
-        'rule 1: "echo" -> echo agent, heard "Could you echo my voice?"'
+        'tier 1: rule 1: "echo" -> echo agent, heard "Could you echo my voice?"'
     )
     # The router passes the frames to the agent; the session ends with it.
     rig.frames(1.0)
@@ -245,7 +255,9 @@ def test_a_command_in_the_waking_transcript_routes_at_once(tmp_path: Path) -> No
     rig = Rig(tmp_path)
     rig.model.feed(woke("Hey autobot, echo this.", 1))
     assert len(rig.agents) == 1 and rig.agents[0].started
-    assert rig.detail[-1] == 'rule 1: "echo" -> echo agent, heard "echo this."'
+    assert rig.detail[-1] == (
+        'tier 1: rule 1: "echo" -> echo agent, heard "echo this."'
+    )
 
 
 def test_only_the_words_after_the_wake_phrase_count(tmp_path: Path) -> None:
@@ -677,3 +689,195 @@ def test_an_agent_asking_before_its_request_is_heard_though_not_listening(
     rig.frames(0.5)
     assert asks.outcome == "yes"
     assert not rig.model.running
+
+
+# --- the routing cascade (IS-17) ------------------------------------------------
+
+OUTSIDE = "what's it like outside"
+
+
+def cascade_rig(
+    tmp_path: Path,
+    *,
+    embedder: FakeEmbedder | None = None,
+    watch: FakeWatch | None = None,
+    route: dict[str, Any] | None = None,
+    agents: Sequence[str] = ("weather", "core"),
+) -> tuple[Rig, FakeTransport]:
+    """The router on the default rules, with a fake embedder and a fake server."""
+    transport = FakeTransport()
+    if route is not None:
+        transport.answers["/v1/route"] = (200, route)
+    seams = Seams(
+        embedder=embedder,
+        watch=watch or FakeWatch(),
+        server=client_on(tmp_path, transport),
+    )
+    rig = Rig(tmp_path, config_text=CONFIG_TEXT, seams=seams, agents=agents)
+    rig.model.feed(woke("hey autobot", 1))
+    rig.frames(0.5)
+    return rig, transport
+
+
+def say(rig: Rig, text: str, stretch: int = 2) -> None:
+    rig.model.feed([transcript(text, stretch), score(stretch)])
+    rig.model.tick()
+
+
+def test_a_sentence_with_no_keyword_routes_to_weather_by_tier_2(
+    tmp_path: Path,
+) -> None:
+    embedder = FakeEmbedder({OUTSIDE: ("weather", 0.81)})
+    rig, transport = cascade_rig(tmp_path, embedder=embedder)
+    say(rig, OUTSIDE)
+    assert rig.defs["weather"].launches == [
+        Launch(rig.model.context.config.agent("weather"), "", OUTSIDE)
+    ]
+    assert rig.detail[-1] == f'tier 2: 0.81 -> weather agent, heard "{OUTSIDE}"'
+    assert ROUTED.format(agent="weather") in rig.summary
+    position = rig.model.position
+    assert (position.node, position.tier) == ("weather", 2)
+    # No keyword rule matched, and the server was not needed.
+    assert rig.router.match is None and transport.sent == []
+
+
+def test_a_keyword_still_routes_as_tier_1_and_marks_the_position(
+    tmp_path: Path,
+) -> None:
+    embedder = FakeEmbedder()
+    rig, transport = cascade_rig(tmp_path, embedder=embedder)
+    say(rig, "what's the weather")
+    assert rig.model.position.tier == 1
+    assert rig.router.match is not None and rig.router.match.route.agent == "weather"
+    assert embedder.calls == [] and transport.sent == []
+
+
+def test_tier_3_fills_the_agents_parameters_for_its_launch(tmp_path: Path) -> None:
+    extra = """
+[[agents]]
+name = "weather"
+
+[[agents.parameters]]
+name = "day"
+values = ["today", "tomorrow"]
+"""
+    transport = FakeTransport()
+    transport.answers["/v1/route"] = (
+        200,
+        {
+            "agent": "weather",
+            "mode": "forecast",
+            "confidence": 0.9,
+            "parameters": {"day": "tomorrow"},
+        },
+    )
+    seams = Seams(
+        embedder=FakeEmbedder(),
+        watch=FakeWatch(),
+        server=client_on(tmp_path, transport),
+    )
+    rig = Rig(
+        tmp_path, config_text=CONFIG_TEXT + extra, seams=seams, agents=("weather",)
+    )
+    rig.model.feed(woke("hey autobot", 1))
+    say(rig, "will I need an umbrella tomorrow")
+    (launch,) = rig.defs["weather"].launches
+    assert (launch.mode, launch.parameters) == ("forecast", {"day": "tomorrow"})
+    assert rig.detail[-1] == (
+        "tier 3: 0.90 -> weather agent (forecast) [day=tomorrow], "
+        'heard "will I need an umbrella tomorrow"'
+    )
+    assert rig.model.position.tier == 3
+
+
+def test_an_agent_the_config_does_not_have_is_refused_and_core_takes_it(
+    tmp_path: Path,
+) -> None:
+    answer = {"agent": "lights", "mode": "", "confidence": 0.99, "parameters": {}}
+    rig, transport = cascade_rig(tmp_path, embedder=FakeEmbedder(), route=answer)
+    say(rig, "turn the lights on")
+    assert transport.paths() == ["/v1/route"]
+    assert "tier 3: lights refused: lights is not an agent" in rig.detail
+    assert rig.defs["weather"].launches == []
+    (launch,) = rig.defs["core"].launches
+    assert (launch.definition.name, launch.transcript) == ("core", "turn the lights on")
+    assert rig.detail[-1] == (
+        'no tier matched -> core agent, heard "turn the lights on"'
+    )
+    assert ROUTED.format(agent="core") in rig.summary
+    # No tier chose the core agent: his edge carries no tier.
+    assert (rig.model.position.node, rig.model.position.tier) == ("core", 0)
+
+
+def test_with_the_server_down_the_same_words_are_not_caught(tmp_path: Path) -> None:
+    rig, transport = cascade_rig(
+        tmp_path, embedder=FakeEmbedder(), watch=FakeWatch(SERVER_DOWN)
+    )
+    say(rig, "turn the lights on")
+    assert rig.summary[-1] == DID_NOT_CATCH == "I didn't catch that."
+    assert NO_MATCH.format(text="turn the lights on") in rig.detail
+    assert transport.sent == []
+    assert rig.defs["core"].launches == [] and rig.defs["weather"].launches == []
+    # The router keeps listening: a command still routes.
+    say(rig, "weather", 3)
+    assert len(rig.defs["weather"].launches) == 1
+
+
+def test_core_is_not_asked_while_chat_is_not_ready(tmp_path: Path) -> None:
+    watch = FakeWatch(SERVER_DEGRADED, chat="the runtime does not have the model")
+    answer = {"agent": "none", "mode": "", "confidence": 0.9, "parameters": {}}
+    rig, transport = cascade_rig(
+        tmp_path, embedder=FakeEmbedder(), watch=watch, route=answer
+    )
+    say(rig, "tell me a joke")
+    # Routing was ready and was asked; chat was not, so core was not started.
+    assert transport.paths() == ["/v1/route"]
+    assert "tier 3: no agent fits" in rig.detail
+    assert rig.summary[-1] == DID_NOT_CATCH
+    assert rig.defs["core"].launches == []
+
+
+def test_with_no_embedder_and_no_server_nothing_is_spawned(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    rig.model.feed(woke("hey autobot", 1))
+    say(rig, "nothing like a command")
+    assert rig.summary[-1] == DID_NOT_CATCH
+    assert rig.detail[-1] == NO_MATCH.format(text="nothing like a command")
+
+
+class Pending(FunctionTask):
+    """A task whose function runs only when the test says so."""
+
+    def __init__(self, function: Callable[[], object]) -> None:
+        self.value = None
+        self._result = None
+        self._abandoned = False
+        self.function = function
+
+    def finish(self) -> None:
+        self._run(self.function)
+
+
+def test_the_router_waits_for_a_decision_that_is_still_being_made(
+    tmp_path: Path,
+) -> None:
+    tasks: list[Pending] = []
+
+    embedder = FakeEmbedder({OUTSIDE: ("weather", 0.81)})
+    rig, _transport = cascade_rig(tmp_path, embedder=embedder)
+
+    def spawn(function: Callable[[], object]) -> FunctionTask:
+        tasks.append(Pending(function))
+        return tasks[-1]
+
+    rig.model.context.spawn = spawn
+    say(rig, OUTSIDE)
+    assert len(tasks) == 1 and rig.defs["weather"].launches == []
+    # What is heard meanwhile waits its turn, and the session does not time out.
+    rig.model.feed([transcript("echo", 3), score(3)])
+    rig.frames(LISTEN_SECONDS + 1.0)
+    assert not rig.router.done and len(tasks) == 1
+    tasks[0].finish()
+    rig.model.tick()
+    assert len(rig.defs["weather"].launches) == 1
+    assert rig.model.position.tier == 2

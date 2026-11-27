@@ -23,6 +23,8 @@ from autobot.tui.screens.routing import RoutingScreen
 from autobot.tui.screens.service import ServiceScreen
 from autobot.tui.screens.session import open_session
 from autobot.tui.screens.wake_phrase import TrainScreen, WakePhraseScreen
+from autobot.tui.server_state import LINE_ROLES as SERVER_LINE_ROLES
+from autobot.tui.server_state import summary as server_summary
 from autobot.tui.session import complete_speakers
 from autobot.tui.state import BADGE_ROLES, State, explain, leftover_model
 from autobot.tui.ui import Canvas, Rect, fit, fit_left
@@ -254,11 +256,25 @@ class MainMenu(MenuView):
             ("Theme", canvas.theme.name or "no colours"),
             ("Config", fit_left(str(services.store.path), rect.width - 11)),
         )
+        row = BANNER_ROWS
         for row, (label, value) in enumerate(facts, start=BANNER_ROWS):
             if row >= rect.height:
                 break
             canvas.put_in(rect, row, 2, label, theme.dim)
             canvas.put_in(rect, row, 10, fit(value, rect.width - 11), theme.dim)
+        # The inference server's state, with its one-line reason, under what
+        # the config file says and beside the listener's state (IS-23).
+        row += 1
+        if row < rect.height:
+            watch = self.app.server
+            canvas.put_in(rect, row, 2, "Server", theme.dim)
+            canvas.put_in(
+                rect,
+                row,
+                10,
+                fit(server_summary(watch), rect.width - 11),
+                getattr(theme, SERVER_LINE_ROLES[watch.state]),
+            )
 
     def state_lines(self, width: int, indent: int) -> list[str]:
         """The state's sentence, folded so that its first line starts at `indent`."""

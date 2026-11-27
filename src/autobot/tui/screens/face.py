@@ -44,6 +44,7 @@ import itertools
 import math
 from collections.abc import Sequence
 
+from autobot.agents import question
 from autobot.agents.tree import (
     LEVEL_ROOT,
     Node,
@@ -146,6 +147,13 @@ class FaceScreen(View):
             app.error(f"The microphone did not open: {self.model.mic.error}")
         # Rendered once per visit, so the first wake's reply is quick.
         prepare(self.model.voice)
+        question.prepare(self.model.voice)
+        # Loaded once per visit, off the frame, so the first sentence that
+        # no keyword matches does not wait for the model (IS-17). A model
+        # that is missing says so when it is first needed.
+        embedder = app.services.embedder
+        if embedder is not None:
+            app.services.spawn(embedder.load)
 
     def leave(self) -> None:
         self.model.close()
@@ -376,6 +384,10 @@ class FaceScreen(View):
             box = picture.boxes[node]
             for map_row in range(box.y, box.bottom):
                 put(map_row, box.x, picture.rows[map_row][box.x : box.right], theme.ok)
+        # The tier of the cascade that decided, on the edge into the box (IS-17).
+        mark = game.tier_mark()
+        if mark and node is not None:
+            put(picture.boxes[node].y - 1, picture.boxes[node].x, mark, theme.accent)
         # A confirmation's question, under the node it is asked at (AG-13).
         if position.phase == PHASE_CONFIRMING and node is not None and position.node:
             question = self.app.config.agent(position.node).confirm_entry_question

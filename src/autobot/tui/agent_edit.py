@@ -27,7 +27,14 @@ from dataclasses import dataclass
 
 from autobot.agents.base import Agent
 from autobot.agents.tree import Node, Tree
-from autobot.config import AGENT_INTRODUCE, AgentConfig, RouteConfig
+from autobot.config import (
+    AGENT_INTRODUCE,
+    AGENT_MODELS,
+    AgentConfig,
+    ParameterConfig,
+    RouteConfig,
+    ToolConfig,
+)
 from autobot.tui.config_edit import Change
 
 TABLE = "agents"
@@ -37,12 +44,17 @@ READ_ONLY = "read-only"
 TEXT = "text"
 TOGGLE = "toggle"
 MULTI_LINE = "multi-line"
+# One line of entries with `LIST_SEPARATOR` between them, written as a list.
+LIST = "list"
+LIST_SEPARATOR = ";"
 SECRET = "secret"
 
 COMMANDS_NOTE = "edited on the Agent routing screen"
 SECRET_NOTE = "stored in Secret Manager; never shown"
 # What is said of a field that neither is edited here nor has a note.
 CODE_NOTE = "part of the agent's code: it is not edited here"
+# The definition's nested tables, which a one-line field cannot hold.
+TABLES_NOTE = "edited in config/autobot.toml, as [[agents.{key}]] tables"
 
 # The rules of `autobot.config._agents`, which has no public complaint
 # helpers: a zip code is five digits, or empty until it is set; a limit is a
@@ -65,6 +77,55 @@ def limit_complaint(text: str) -> str | None:
     if not _WHOLE.fullmatch(typed) or int(typed) <= 0:
         return "a limit is a positive whole number"
     return None
+
+
+def model_complaint(text: str) -> str | None:
+    """An agent's `model` is one of `AGENT_MODELS` (IS-18)."""
+    if text.strip() not in AGENT_MODELS:
+        return f"type one of: {', '.join(AGENT_MODELS)}"
+    return None
+
+
+def split_list(text: str) -> list[str]:
+    """The entries of one typed line, spaces squeezed, empty ones dropped."""
+    entries = (" ".join(part.split()) for part in text.split(LIST_SEPARATOR))
+    return [entry for entry in entries if entry]
+
+
+def fallback_complaint(text: str) -> str | None:
+    """A `fallback` is models in order and, last only, a line to say (IS-18)."""
+    entries = split_list(text)
+    for entry in entries[:-1]:
+        if entry not in AGENT_MODELS:
+            return (
+                f"{entry!r} is not one of: {', '.join(AGENT_MODELS)}; "
+                "a spoken line can only be last"
+            )
+    return None
+
+
+def parameters_text(parameters: Sequence[ParameterConfig]) -> str:
+    """An agent's or a tool's slots on one line: `day (string: today, tomorrow)*`."""
+    if not parameters:
+        return "(none)"
+    shown = []
+    for slot in parameters:
+        values = ", ".join(str(value) for value in slot.values)
+        text = f"{slot.name} ({slot.type}{': ' + values if values else ''})"
+        shown.append(text + ("*" if slot.required else ""))
+    return "; ".join(shown)
+
+
+def tools_text(tools: Sequence[ToolConfig]) -> str:
+    """An agent's tools on one line, each with its slots."""
+    if not tools:
+        return "(none)"
+    return "; ".join(
+        f"{tool.name}({parameters_text(tool.parameters)})"
+        if tool.parameters
+        else tool.name
+        for tool in tools
+    )
 
 
 def empty_complaint(text: str) -> str | None:
@@ -137,7 +198,7 @@ class Field:
     @property
     def editable(self) -> bool:
         """Whether the field writes a key of the definition."""
-        return self.kind in (TEXT, TOGGLE, MULTI_LINE)
+        return self.kind in (TEXT, TOGGLE, MULTI_LINE, LIST)
 
     @property
     def text(self) -> str:
@@ -163,6 +224,8 @@ class Field:
         where = f"[[agents]] {self.key}"
         if self.kind == TEXT:
             return f"Enter changes {where}, written at once"
+        if self.kind == LIST:
+            return f"Enter changes {where} (entries with {LIST_SEPARATOR} between)"
         if self.kind == TOGGLE:
             turn = "off" if self.value else "on"
             return f"Enter turns {where} {turn}, written at once"
@@ -186,6 +249,8 @@ class Field:
             return Change(TABLE, self.key, not self.value, self.index)
         if self.kind == MULTI_LINE:
             return Change(TABLE, self.key, text, self.index)
+        if self.kind == LIST:
+            return Change(TABLE, self.key, split_list(text), self.index)
         if self.kind != TEXT:
             raise ValueError(f"{self.label} is not written to the config file")
         if isinstance(self.value, int):
@@ -240,6 +305,28 @@ def fields(
             note=COMMANDS_NOTE,
         ),
         Field("Language model", READ_ONLY, "yes" if agent.uses_model else "no"),
+        # Which model answers for the agent, and what it falls back to (IS-18).
+        Field("Model", TEXT, definition.model, "model", index, check=model_complaint),
+        Field(
+            "Fallback",
+            LIST,
+            f"{LIST_SEPARATOR} ".join(definition.fallback),
+            "fallback",
+            index,
+            check=fallback_complaint,
+        ),
+        Field(
+            "Parameters",
+            READ_ONLY,
+            parameters_text(definition.parameters),
+            note=TABLES_NOTE.format(key="parameters"),
+        ),
+        Field(
+            "Tools",
+            READ_ONLY,
+            tools_text(definition.tools),
+            note=TABLES_NOTE.format(key="tools"),
+        ),
     ]
     if agent.uses_model or agent.name == AGENT_INTRODUCE:
         label = "Script" if agent.name == AGENT_INTRODUCE else "Prompt"

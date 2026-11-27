@@ -196,3 +196,21 @@ def test_the_protagonists_eyes_follow_the_pose() -> None:
     unicode_rows = draw_protagonist(Pose(), Glyphs.unicode())
     assert unicode_rows[0] == " ╭─╮╭─╮ "
     assert unicode_rows[1].strip() == "│█││█│"
+
+
+def test_the_tier_that_decided_is_marked_while_the_command_stands(
+    picture: Picture,
+) -> None:
+    game = Game(picture)
+    game.follow(WAKE, START)
+    assert game.tier_mark() == ""
+    game.follow(Position(LEVEL_AGENTS, "weather", PHASE_COMMAND, 2), START)
+    assert game.tier_mark() == "tier 2"
+    game.follow(Position(LEVEL_AGENTS, "weather", PHASE_RUNNING, 3), START)
+    assert game.tier_mark() == "tier 3"
+    # The core agent was chosen by no tier, and a session that is over has none.
+    game.follow(Position(LEVEL_AGENTS, "core", PHASE_RUNNING), START)
+    assert game.tier_mark() == ""
+    game.follow(Position(LEVEL_ROOT, "", PHASE_DONE, 2), START)
+    assert game.tier_mark() == ""
+    assert Position().tier == 0

@@ -1,0 +1,33 @@
+{
+  "server_version": "0.1.0",
+  "contract_version": "1",
+  "jobs": {
+    "stt": {
+      "ready": true,
+      "model": "large-v3-turbo",
+      "reason": ""
+    },
+    "route": {
+      "ready": true,
+      "model": "qwen3:8b",
+      "reason": ""
+    },
+    "chat": {
+      "ready": true,
+      "model": "qwen3:8b",
+      "reason": ""
+    }
+  },
+  "tts": false,
+  "budget": {
+    "stt_mib": 3072,
+    "llm_weights_mib": 5120,
+    "llm_kv_cache_mib": 1536,
+    "cuda_contexts_mib": 1024,
+    "total_mib": 10752
+  },
+  "gpu": {
+    "used_mib": 7650,
+    "free_mib": 3360
+  }
+}

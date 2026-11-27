@@ -40,11 +40,11 @@ from __future__ import annotations
 
 import random
 from collections import deque
-from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from autobot.audio_check import AudioCheckError, resolve_device
 from autobot.config import Config
@@ -59,14 +59,19 @@ from autobot.tui.face_ticker import (
 )
 from autobot.tui.monitor import EVENT_SCORE, EVENT_WAKE, Event
 from autobot.tui.runner import FunctionTask, Runner, Task, listener_hold_argv
+from autobot.tui.server_state import ServerNotice
 
 if TYPE_CHECKING:
     from autobot.agents.confirm import Confirmation
     from autobot.agents.gemini import Model
+    from autobot.agents.hearing import Hearing
     from autobot.agents.response import Response
     from autobot.agents.speech import Speaker
     from autobot.agents.weather_api import Lookup
+    from autobot.embedding import Embedder
     from autobot.gcp.client import GoogleCloud
+    from autobot.server.client import ServerClient
+    from autobot.server.watch import ServerWatch
     from autobot.tui.app import Services
     from autobot.tui.tree_game import Position
 
@@ -256,8 +261,10 @@ class Seams:
 
     `launch` starts a local command detached and answers its one-line error,
     empty when it started. `connect` is Google Cloud as the service account,
-    or `GcpError`. `weather` is the weather lookup, and `model` makes the
-    language model for a configuration. A seam left None is one the face was
+    or `GcpError`. `weather` is the weather lookup, `models` makes the
+    language model of each kind, `local` and `gemini`, for a configuration
+    (IS-18), and `hearing` transcribes, locally,
+    a recording an agent made after its own cue (`CN-1`). A seam left None is one the face was
     not given: the agent that needs it says so in one line.
     """
 
@@ -265,7 +272,20 @@ class Seams:
     launch: Callable[[Sequence[str], Path], str] = _no_launch
     connect: Callable[[Config, Path], GoogleCloud] | None = None
     weather: Lookup | None = None
-    model: Callable[[Config, Path], Model] | None = None
+    models: Mapping[str, Callable[[Config, Path], Model]] = field(default_factory=dict)
+    hearing: Hearing | None = None
+    # The inference server on the LAN: what the NUC last learned of it, and
+    # the client that calls it (IS-23). None where the face was given none.
+    watch: ServerWatch | None = None
+    server: ServerClient | None = None
+    # The NUC's own sentence embeddings, for tier 2 of the routing cascade
+    # (IS-17). None where the face was given none: that tier is then skipped.
+    embedder: Embedder | None = None
+    # The tools a model may call, by name: each takes the call's arguments
+    # and answers its result as text. The NUC runs them (IS-21). None ships.
+    tools: Mapping[str, Callable[[Mapping[str, Any]], str]] = field(
+        default_factory=dict
+    )
 
 
 class Experience(Protocol):
@@ -501,6 +521,8 @@ class FaceModel:
         # transcript with its stretch: a wake belongs to that stretch.
         self._stretch: int | None = None
         self._transcript: tuple[int, str] | None = None
+        # Tells when the inference server comes or goes (IS-23).
+        self._server_notice = ServerNotice()
 
     @classmethod
     def from_services(
@@ -659,6 +681,7 @@ class FaceModel:
     def tick(self) -> None:
         """One frame: the ticker moves, the experience runs, the eyes move on."""
         self.ticker.advance(self.context.clock())
+        self._notice_server()
         if self.experience is not None:
             self.experience.tick(self.context)
             self._finish_if_done()
@@ -667,6 +690,19 @@ class FaceModel:
     def next_frame(self) -> float:
         """Seconds until the next frame is wanted: when the ticker's next column is due."""
         return self.ticker.due(self.context.clock())
+
+    def _notice_server(self) -> None:
+        """React when the inference server has come or gone (IS-23)."""
+        watch = self.context.seams.watch
+        if watch is None:
+            return
+        line = self._server_notice.changed(watch)
+        if not line:
+            return
+        self.ticker.note(line)
+        # The eyes are an experience's while one runs: the ticker says it then.
+        if self.experience is None:
+            self.eyes.play("notice")
 
     def _finish_if_done(self) -> None:
         if self.experience is not None and self.experience.done:

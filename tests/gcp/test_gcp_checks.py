@@ -334,7 +334,7 @@ def test_gemini_on_vertex_needs_the_api_and_the_permission() -> None:
     cloud.permissions[PROJECT].discard("aiplatform.endpoints.predict")
     step = check(cloud)[STEP_GEMINI]
     assert step.state is State.MISSING
-    assert "Vertex AI (aiplatform.googleapis.com) in us-east5" in texts(step)[0]
+    assert "Vertex AI (aiplatform.googleapis.com) in global" in texts(step)[0]
     assert len(lines(step)) == 1 and "--role=roles/aiplatform.user" in lines(step)[0]
 
 

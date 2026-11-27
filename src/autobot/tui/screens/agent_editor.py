@@ -32,6 +32,7 @@ from autobot.config import Config
 from autobot.gcp.client import GcpError
 from autobot.gcp.secrets import store_secret
 from autobot.tui.agent_edit import (
+    LIST,
     MULTI_LINE,
     SECRET,
     TEXT,
@@ -282,7 +283,7 @@ class AgentView(View):
         self.refresh()
         app = self.app
         field = self.fields[self.cursor]
-        if field.kind == TEXT:
+        if field.kind in (TEXT, LIST):
             typed = app.prompt(
                 f"{self.name}: {field.label}",
                 f"[[agents]] {field.key} of the {self.name} agent:",

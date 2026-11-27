@@ -62,7 +62,9 @@ target = "ack"
 # and "introduce", each defined by an [[agents]] table below. A rule may carry
 # a `mode`, a word the agent receives with the command: two rules to one agent
 # are aliases, and the mode is what differs ("forecast" opens the weather
-# agent on the days ahead). The Agent routing screen edits these.
+# agent on the days ahead). A rule may also carry `examples`, phrases that
+# mean what its command means, for the semantic match that is tried when no
+# command stands in what was said. The Agent routing screen edits these.
 [[routes]]
 command = "question"
 agent = "question"
@@ -112,9 +114,15 @@ actions = ["cancel"]
 # language model; the introduce agent's written script), two confirmations,
 # each on or off with its question (`confirm_entry` after the command matches,
 # `confirm_request` before a request goes off the machine), and `listening`,
-# whether the face listens, and hears "cancel", while the agent runs. The
-# weather and camera agents also have settings of their own. The Agent editor
-# screen edits these.
+# whether the face listens, and hears "cancel", while the agent runs. An
+# agent may also have a `model` ("none", the default, "local" or "gemini"), a
+# `fallback` (the models to try in order when its own cannot answer, and, last
+# only, a line it says instead), `[[agents.parameters]]` (named slots, each
+# with a `type` of "string", "integer", "number" or "boolean", its allowed
+# `values` and whether it is `required`) and `[[agents.tools]]` (each with a
+# `name`, a `description` and `parameters` of the same shape). The weather and
+# camera agents also have settings of their own. The Agent editor screen edits
+# these.
 [[agents]]
 name = "echo"
 description = "Records five seconds of your voice and plays it back."
@@ -144,6 +152,9 @@ confirm_entry_question = "Are you sure you want to start this?"
 confirm_request = false
 confirm_request_question = "This may cost a few dollars. Are you sure you want to run this?"
 listening = true
+# The model behind the agent: "none" (code only), "local" (the inference
+# server's language model, on GAMEON1) or "gemini" (as the service account).
+model = "gemini"
 
 [[agents]]
 name = "weather"
@@ -208,6 +219,29 @@ confirm_request = false
 confirm_request_question = "This may cost a few dollars. Are you sure you want to run this?"
 listening = true
 
+# The core agent is autobot himself: it takes what was said when no rule
+# matches, so it has no [[routes]] entry. Its prompt is its personality.
+[[agents]]
+name = "core"
+description = "autobot himself: talks with you when no command matches, on the inference server's language model."
+prompt = """
+You are autobot, a friendly voice assistant on the owner's computer at home.
+You talk with the owner out loud, one turn at a time, and remember what was
+said earlier in the conversation.
+Keep each reply short and plain: one to three sentences that are easy to
+hear, with no lists, symbols or markup.
+When a question needs more knowledge or reasoning than you have, hand it to
+one of the agents you are given, with the question that agent should get.
+"""
+confirm_entry = false
+confirm_entry_question = "Are you sure you want to start this?"
+confirm_request = false
+confirm_request_question = "This may cost a few dollars. Are you sure you want to run this?"
+listening = true
+model = "local"
+# When the server is away: Gemini, then this line, said aloud.
+fallback = ["gemini", "the server is away"]
+
 [ack]
 text = "Yes?"
 # A piper-tts voice name. Synthesis is local (CONSTRAINTS.md CN-2).
@@ -217,6 +251,73 @@ voice = "en_US-joe-medium"
 # The colour theme of the terminal user interface: "light", "dark" or "sun".
 # Pressing T in the interface switches to the next one and writes it here.
 theme = "sun"
+
+# The GPU inference server on GAMEON1, in WSL, on the owner's LAN. The NUC
+# never depends on it: while it is away, each job falls back on its own. The
+# NUC reads the address, the token file, the timeouts, the poll intervals and
+# the thresholds; the server reads its hostname and its models from here.
+[server]
+# Whether the NUC looks for the server at all.
+enabled = true
+# Whether what is said inside a session (a command, a question, a yes or a
+# no) is sent to the server to be transcribed by its larger model. Off: every
+# transcript is the NUC's own tiny.en. Turn it on only once CONSTRAINTS.md
+# CN-1 has been amended to allow speech-to-text on GAMEON1; the wake word is
+# never sent either way.
+stt_enabled = false
+# The server's address, by its DHCP reservation, as http://host:port. The
+# port is the one the server binds and the firewall rules open.
+url = "http://192.168.86.53:8300"
+# The shared bearer token, relative to the repository root. Only the path is
+# configuration: the file is a secret, made by `make server-token` at mode
+# 0600, and never read by anything but the client.
+token_file = "secrets/server-token"
+# The hostname the server refuses to run anywhere but.
+hostname = "GAMEON1"
+# The timeout of each call, in seconds. On a timeout the NUC falls back at
+# once and does not retry. Speech-to-text gets the base plus so much per
+# second of audio; chat gets one limit to its first token and one in all.
+health_timeout = 1.0
+stt_timeout_base = 0.5
+stt_timeout_per_second = 0.25
+route_timeout = 1.5
+chat_first_token_timeout = 3.0
+chat_timeout = 30.0
+# How often the NUC asks the server's /health, in seconds: while it is up,
+# and, while it is down, backing off from the least to the most.
+poll_up_seconds = 5.0
+poll_down_min_seconds = 5.0
+poll_down_max_seconds = 60.0
+# The confidence, above 0 and at most 1, at which the routing cascade admits
+# tier 2 (the semantic match on the NUC) and tier 3 (the server's model).
+# Tier 1, the keyword rules, always counts as 1.
+tier2_threshold = 0.6
+tier3_threshold = 0.7
+# The most characters of hints (agent names, commands, modes, yes and no
+# words, action keywords) sent with each transcription.
+hint_chars = 500
+# The most rounds of tool calls the NUC runs in one turn.
+tool_rounds = 3
+# How long, in seconds, the core agent waits for the next turn after it has
+# answered, before the session ends.
+core_listen_seconds = 10
+# The server's own models, read on GAMEON1. The speech-to-text model is a
+# directory relative to the server's checkout, fetched there by
+# `make server-fetch-models`; its compute type is "int8_float16" or "float16".
+stt_model = "models/faster-whisper/large-v3-turbo"
+stt_compute_type = "int8_float16"
+# The language model, as the runtime names it. Empty until `make server-eval`
+# has measured the candidates and the owner has written the winner here.
+llm_model = ""
+# The language model's context, in tokens.
+llm_context = 8192
+# The runtime that serves the language model, bound to loopback on GAMEON1.
+runtime = "ollama"
+runtime_url = "http://127.0.0.1:11434"
+# The NUC's embedding model for tier 2: the int8 ONNX file of
+# all-MiniLM-L6-v2, relative to the repository root, with its tokenizer.json
+# beside it. Fetched by `make fetch-models`; loaded from this path only.
+embedding_model = "models/embedding/all-MiniLM-L6-v2/model_int8.onnx"
 
 # Google Cloud. autobot and its agents use Google Cloud only as their own
 # service account, never as the owner (GC-4). The Google Cloud screen
@@ -244,6 +345,11 @@ gemini_api = "aiplatform.googleapis.com"
 # models the API offers now and writes the one chosen here. A cap on a quota
 # that is counted per model is for this model.
 gemini_model = "gemini-3.5-flash-lite"
+# Where Vertex AI serves the model: "global", or a region such as "us-east5".
+# The newer Gemini models are served only at "global", and asking for one in
+# a region that does not serve it answers 404 NOT_FOUND. Quotas are still
+# compared in `region`.
+gemini_location = "global"
 # The Cloud Storage buckets autobot is meant to use. None yet (GC-12).
 buckets = []
 

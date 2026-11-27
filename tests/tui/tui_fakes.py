@@ -19,6 +19,8 @@ from autobot.audio_check import DeviceKind
 from autobot.config import Config
 from autobot.gcp.client import GcpError, GoogleCloud
 from autobot.gcp.keyfile import IGNORED, NOT_IGNORED
+from autobot.server.watch import DOWN as SERVER_DOWN
+from autobot.server.watch import ServerWatch
 from autobot.tui.app import App, Services
 from autobot.tui.audio import BlockHandler, Clip, InputStream, Samples
 from autobot.tui.config_edit import ConfigStore
@@ -36,6 +38,7 @@ from autobot.wakeword.dataset import VOICE_DIR, VoiceDataset
 from autobot.wakeword.evaluate import KindScores, RealScores
 from autobot.wakeword.script import Prompt
 from gcp.gcp_fakes import FakeGoogleCloud, write_key
+from server.server_fakes import FakeTransport, FakeWatch, client_on
 
 CONFIG_TEXT = """\
 # autobot configuration: the comments here must survive every write.
@@ -474,6 +477,8 @@ def make_harness(
     score_kind: Callable[[str, Config, VoiceDataset], KindScores] = no_baseline,
     cloud: FakeGoogleCloud | None = None,
     key_ignored: bool = True,
+    server_transport: FakeTransport | None = None,
+    server_watch: ServerWatch | None = None,
     connect_error: str = "",
 ) -> Harness:
     """The real `App` on fakes.
@@ -546,6 +551,10 @@ def make_harness(
         weather_lookup=lookup,
         model=lambda config, repo: model,
         git_check_ignore=lambda repo, path: IGNORED if key_ignored else NOT_IGNORED,
+        # The inference server on fakes: no socket is opened and no token of
+        # the owner's is read. It is away unless the test gives a watcher.
+        server_client=client_on(tmp_path, server_transport or FakeTransport()),
+        server_watch=server_watch or FakeWatch(SERVER_DOWN),
     )
     if cloud is not None or connect_error:
         write_key(services.store.load().gcp, tmp_path)

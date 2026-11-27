@@ -6,6 +6,7 @@ import pytest
 from tui_fakes import CONFIG_TEXT, ENTER, ESC, UP, Key, make_harness, typed
 
 from autobot.tui.app import MIN_HEIGHT, MIN_WIDTH
+from autobot.tui.screens.routing import split_examples
 
 # Up from the first entry wraps to Quit; then Google Cloud, Word lists and
 # Agent routing.
@@ -129,3 +130,50 @@ mode = "forecast"
     assert screen.saw('2  Rule 2: "forecast" -> weather agent (forecast)')
     # The agents a rule can name are the six.
     assert screen.saw("echo, question, weather, time, camera, introduce")
+
+
+def test_a_rules_example_phrases_are_typed_on_one_line_and_written(
+    tmp_path: Path,
+) -> None:
+    keys = [
+        *OPEN,
+        "3",
+        ENTER,
+        *typed("say that again;  repeat   after me ; "),
+        ENTER,
+        -1,
+        ESC,
+        "q",
+    ]
+    harness = make_harness(tmp_path, keys, config_text=CONFIG_TEXT + ROUTES)
+    assert harness.run() == 0
+    assert harness.screen.saw("3  Example phrases of a rule...")
+    assert 'examples = ["say that again", "repeat after me"]' in harness.config_text()
+    assert harness.app.config.routes[0].examples == (
+        "say that again",
+        "repeat after me",
+    )
+    assert harness.screen.saw('Rule 1: "echo" -> echo agent, 2 examples')
+
+
+def test_an_example_phrase_given_twice_is_refused(tmp_path: Path) -> None:
+    keys = [
+        *OPEN,
+        "3",
+        ENTER,
+        *typed("again; Again!"),
+        ENTER,
+        -1,
+        ESC,
+        ESC,
+        "q",
+    ]
+    harness = make_harness(tmp_path, keys, config_text=CONFIG_TEXT + ROUTES)
+    assert harness.run() == 0
+    assert harness.screen.saw("a phrase is there twice")
+    assert harness.config_text() == CONFIG_TEXT + ROUTES
+
+
+def test_the_example_phrases_are_split_at_the_separator() -> None:
+    assert split_examples(" one  two ;three;; ") == ["one two", "three"]
+    assert split_examples("") == []

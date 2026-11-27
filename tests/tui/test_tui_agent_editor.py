@@ -165,8 +165,9 @@ def test_zero_from_the_main_menu_shows_the_tree_with_autobot_selected(
     for text in (
         "═ Agent editor ",
         "│ autobot │",
-        "│ question │",
-        "│ weather │",
+        # With the core agent the tree is wider than the smallest terminal:
+        # the boxes under the selected root are the ones in view.
+        "│ time │",
         "forecast (forecast)",
         "autobot: the wake phrase",
         "Heard at every level: cancel",
@@ -303,7 +304,7 @@ def test_a_limit_is_written_as_a_whole_number(tmp_path: Path) -> None:
 def test_toggling_the_confirmation_on_the_way_in_writes_it_and_marks_the_tree(
     tmp_path: Path,
 ) -> None:
-    keys: list[Key] = [*WEATHER, DOWN, DOWN, DOWN, DOWN, ENTER, -1, ESC, -1, ESC, "q"]
+    keys: list[Key] = [*WEATHER, *[DOWN] * 8, ENTER, -1, ESC, -1, ESC, "q"]
     harness = harness_with(tmp_path, keys)
     assert harness.run() == 0
     screen = harness.screen
@@ -323,7 +324,7 @@ def test_toggling_the_confirmation_on_the_way_in_writes_it_and_marks_the_tree(
 
 def test_a_key_absent_from_the_table_is_added_to_it(tmp_path: Path) -> None:
     # The file's weather table has no `confirm_request`: its toggle adds it.
-    keys: list[Key] = [*WEATHER, *[DOWN] * 6, ENTER, -1, *LEAVE]
+    keys: list[Key] = [*WEATHER, *[DOWN] * 10, ENTER, -1, *LEAVE]
     harness = harness_with(tmp_path, keys)
     assert harness.run() == 0
     assert harness.screen.saw("Saved: [agents #3] confirm_request = true")
@@ -337,7 +338,7 @@ def test_editing_the_question_agents_prompt_writes_a_multi_line_string(
     tmp_path: Path,
 ) -> None:
     # Prompt is the fifth field. `T` and `q` are letters in the open text.
-    keys: list[Key] = [*QUESTION, DOWN, DOWN, DOWN, DOWN, -1, ENTER, -1]
+    keys: list[Key] = [*QUESTION, *[DOWN] * 8, -1, ENTER, -1]
     keys += [*typed("Tq "), -1, DOWN, DOWN, *typed("Be brief."), ENTER, -1]
     keys += [ESC, -1, *LEAVE]
     harness = harness_with(tmp_path, keys, theme="light")
@@ -375,7 +376,7 @@ def test_editing_the_question_agents_prompt_writes_a_multi_line_string(
 
 
 def test_a_text_closed_unchanged_writes_nothing(tmp_path: Path) -> None:
-    keys: list[Key] = [*QUESTION, DOWN, DOWN, DOWN, DOWN, ENTER]
+    keys: list[Key] = [*QUESTION, *[DOWN] * 8, ENTER]
     keys += ["x", BACKSPACE, ESC, -1, *LEAVE]
     harness = harness_with(tmp_path, keys)
     assert harness.run() == 0
@@ -433,7 +434,7 @@ def test_an_agent_the_file_does_not_define_is_shown_and_refuses_a_change(
     tmp_path: Path,
 ) -> None:
     # The harness's own config has no [[agents]] table: every definition is a default.
-    keys: list[Key] = [*WEATHER, DOWN, DOWN, DOWN, DOWN, ENTER, -1, *LEAVE]
+    keys: list[Key] = [*WEATHER, *[DOWN] * 8, ENTER, -1, *LEAVE]
     harness = harness_with(tmp_path, keys, config_text=CONFIG_TEXT)
     assert harness.run() == 0
     screen = harness.screen

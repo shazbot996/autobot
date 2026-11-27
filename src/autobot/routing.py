@@ -27,6 +27,7 @@ from dataclasses import dataclass
 
 from autobot.config import (
     AGENT_CAMERA,
+    AGENT_CORE,
     AGENT_ECHO,
     AGENT_INTRODUCE,
     AGENT_QUESTION,
@@ -43,6 +44,7 @@ AGENT_NOTES = {
     AGENT_TIME: "says the time from this computer's clock",
     AGENT_CAMERA: "opens the camera application in Firefox on the NUC",
     AGENT_INTRODUCE: "says who autobot is and how he works",
+    AGENT_CORE: "talks with you when no command matches",
 }
 
 _APOSTROPHES = re.compile(r"['’]")

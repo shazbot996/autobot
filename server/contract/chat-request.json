@@ -1,0 +1,78 @@
+{
+  "system": "You are autobot, a friendly voice assistant on the owner's computer at home.\nYou talk with the owner out loud, one turn at a time, and remember what was\nsaid earlier in the conversation.\nKeep each reply short and plain: one to three sentences that are easy to\nhear, with no lists, symbols or markup.\nWhen a question needs more knowledge or reasoning than you have, hand it to\none of the agents you are given, with the question that agent should get.\n",
+  "messages": [
+    {
+      "role": "user",
+      "content": "how long do eggs take to boil"
+    },
+    {
+      "role": "assistant",
+      "content": "{\"summary\": \"About nine minutes for hard boiled eggs.\", \"detail\": [\"soft: 6 min\", \"hard: 9 min\"]}"
+    },
+    {
+      "role": "user",
+      "content": "set a timer for that"
+    },
+    {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+        {
+          "id": "call-1",
+          "name": "set_timer",
+          "arguments": {
+            "minutes": 9
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "{\"set\": true, \"minutes\": 9}",
+      "tool_call_id": "call-1"
+    }
+  ],
+  "response_schema": {
+    "type": "object",
+    "properties": {
+      "summary": {
+        "type": "string"
+      },
+      "detail": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "handoff": {
+        "type": "object",
+        "properties": {
+          "agent": {
+            "type": "string",
+            "enum": ["question"]
+          },
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": ["agent", "query"]
+      }
+    },
+    "required": ["summary", "detail"]
+  },
+  "tools": [
+    {
+      "name": "set_timer",
+      "description": "Starts a timer on the NUC that rings when it ends.",
+      "parameters": [
+        {
+          "name": "minutes",
+          "type": "integer",
+          "values": [],
+          "required": true
+        }
+      ]
+    }
+  ],
+  "stream": false
+}

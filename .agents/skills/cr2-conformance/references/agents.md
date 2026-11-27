@@ -1,10 +1,3 @@
----
-provenance:
-  - run: schiele/0043
-    at: 2026-11-27T03:56:27.740Z
-    mode: revise
----
-
 ## About an AGENTS file
 
 AGENTS.md is read by coding agents before they touch the repository, and by nobody else with the same

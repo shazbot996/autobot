@@ -38,6 +38,9 @@ provenance:
   - run: schiele/0096
     at: 2026-11-27T15:22:56.376Z
     mode: revise
+  - run: schiele/0097
+    at: 2026-11-27T15:26:24.059Z
+    mode: revise
 ---
 
 # Google Cloud Configuration Screen — Implementation Plan
@@ -228,7 +231,7 @@ Nothing in the spec is built yet. There is no `src/autobot/gcp/` package, no `[g
 
 1. **Calls are plain REST through `google-auth`**, not one client library per Google API. That gives one small `GoogleCloud` seam to fake (GC-13), a host allowlist in one place, and only two dependencies.
 2. **ADC is pointed at the key by setting `GOOGLE_APPLICATION_CREDENTIALS` in the process before `google.auth.default()`.** That is the ADC search the spec names (GC-4), and the agents autobot later runs in the same process inherit it.
-3. **Too-broad roles are found with `testIamPermissions` on marker permissions**, not by reading the project's IAM policy. None of the GC-6 roles grants `resourcemanager.projects.getIamPolicy`. See Open Questions.
+3. **Too-broad roles are found with `testIamPermissions` on marker permissions**, not by reading the project's IAM policy. None of the GC-6 roles grants `resourcemanager.projects.getIamPolicy`, and the detection needs no extra grant, whereas `roles/browser` would let the agent read every member's bindings. The owner sees which role grants a marker by running the read-only `get-iam-policy` command the step shows.
 4. **The weather key restriction is checked by the key's display name `autobot-weather`**, which the create command sets. Checking it this way means the check never reads the secret's value.
 5. **A pasted secret is held in a `bytearray` and zeroed after use.** A Python `str` cannot be cleared, and GC-9 asks for the value to be cleared from memory.
 6. **The intended cap's period lives in the quota id** (per day, or per minute), so a `[[gcp.quotas]]` entry is exactly `api`, `metric` and `limit`, as the spec's SCHEMA change lists. Regional quotas are compared in `[gcp] region`.
@@ -259,4 +262,4 @@ Nothing in the spec is built yet. There is no `src/autobot/gcp/` package, no `[g
 
 ## Open Questions
 
-- **How the account's broad roles are found.** GC-6 says the step "reads the account's roles", but no GC-6 role lets the account read the project's IAM policy. Recommended: detect broad roles by testing marker permissions with `testIamPermissions`, and show the owner the read-only `get-iam-policy` command to see which role grants them. This needs no extra grant, whereas `roles/browser` would let the agent read every member's bindings.
+None.

@@ -7,6 +7,8 @@
 .cr2/graph/*/
 .cr2/story/
 prompts/*/DRAFT.prompt.md
+# cr2's cache (its clone of the skills repository)
+.run/
 
 # python
 .venv/
@@ -18,6 +20,9 @@ dist/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
 
 # autobot: runtime state (pid file, log, socket) and model files, never committed
 run/
@@ -29,3 +34,17 @@ data/
 # secrets
 .env
 .env.*
+*.pem
+*.key
+*credentials*.json
+service-account*.json
+
+# agent tools: per-machine settings
+.claude/settings.local.json
+
+# editors and the desktop
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store

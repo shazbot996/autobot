@@ -16,6 +16,9 @@ provenance:
   - run: schiele/0129
     at: 2026-11-27T21:18:07.757Z
     mode: revise
+  - run: schiele/0131
+    at: 2026-11-27T21:22:45.579Z
+    mode: revise
 ---
 
 # autobot — GPU inference server
@@ -29,6 +32,8 @@ The **inference server** is a second program of autobot. It runs on `GAMEON1`, t
 **Text-to-speech** is reserved for a later revision. The NUC stays the front end: the wake word, the microphone, the speaker, the face, the rules layer, the agents and all agent state stay there, and every one of them keeps working when the server is away. The server is a stateless function of its requests: it keeps no session, no memory and no audio. Rules IS-1 to IS-27 govern it. The host itself is described in `docs/context/INFRASTRUCTURE.md`. The spec builds on `CN-1`, `CN-2`, TS-5, TS-11, RR-1, RR-3, AS-1, AS-2, AS-5, AG-1, AG-4, AG-11, AG-13, AG-14, FS-15, GC-4 and GC-10. It depends on amendments to `CN-1` and `CN-2`, RR-1, AS-1 and `CONVENTIONS.md`, listed under "Changes needed elsewhere". IS-8 takes effect once `CONSTRAINTS.md` carries the amendment to `CN-1`.
 
 *Revised 2026-11-27: the owner's decisions recorded, and the status set to active. IS-1, IS-4, IS-8, IS-9, IS-10 and IS-12 are amended in place, the open choices of IS-2, IS-3, IS-7, IS-11, IS-13 and IS-14 are settled, and IS-15 to IS-27 are added.*
+
+*Revised 2026-11-27: the owner's answers to the open questions recorded. IS-10, IS-14, IS-17 and IS-26 are amended in place.*
 
 ## Numbered rules, each with its reason
 
@@ -139,7 +144,7 @@ The **inference server** is a second program of autobot. It runs on `GAMEON1`, t
       - Ollama runs on `GAMEON1`, bound to `127.0.0.1` only, behind autobot's own server on port 8300, which is the only thing the NUC talks to.
       - The server reaches the runtime through one seam, so llama.cpp's `llama-server` can replace Ollama without a change to the contract.
       - The server never pulls a model. A missing model is a one-line "not ready" in `/health`, and models arrive only through `make server-fetch-models` (IS-25).
-    - **Text-to-speech.** It is not in the first version: piper on the NUC stays the voice. `/v1/tts` is reserved, and `/health` reports `tts: false`. A later revision may add a neural voice (for example Kokoro), with piper as the fallback.
+    - **Text-to-speech.** It is not in the first version: piper on the NUC stays the voice. `/v1/tts` is reserved, and `/health` reports `tts: false`. A neural voice on the server (for example Kokoro) is an eventual goal, to be added in a later revision once one is measured to sound better and to fit the VRAM budget above. Piper stays the fallback in any case.
 
     Reason: the card has 11,264 MiB and every resident model must stay loaded (IS-24), because loading one per request would cost seconds that a voice reply cannot spare. A Whisper large-class model and a 4-bit 8B model together are the largest pair that fits. A budget checked at start fails visibly instead of out of memory mid-request. One seam to the runtime keeps the choice of runtime reversible.
 
@@ -167,7 +172,7 @@ The **inference server** is a second program of autobot. It runs on `GAMEON1`, t
 
     Reason: audio and transcripts from the house cross the LAN, and the address filter is a rule the owner can read in one line. The merge of the Hyper-V firewall and the host policy is untested, and Windows classes the LAN as Public, so the token makes a firewall mistake fail closed.
 
-14. **IS-14. The server starts on its own when the PC boots.** A Windows scheduled task starts the WSL distribution at boot and keeps it running. Inside WSL, a systemd user unit, kept running by lingering (IS-25), starts the server and restarts it when it fails. The NUC does not start, stop or wake the server.
+14. **IS-14. The server starts on its own when the PC boots.** A Windows scheduled task starts the WSL distribution at boot and keeps it running. Inside WSL, a systemd user unit, kept running by lingering (IS-25), starts the server and restarts it when it fails. The NUC does not start, stop or wake the server, and Wake-on-LAN is not used: the owner keeps the PC on and the server operational, and a PC that is asleep counts as down.
 
     The Windows, router and system steps are the owner's, done by hand before anything else:
     - the DHCP reservation;
@@ -190,7 +195,7 @@ The **inference server** is a second program of autobot. It runs on `GAMEON1`, t
 
 17. **IS-17. Routing is a cascade inside the rules layer.** The global action keywords are checked first (AG-14). Then:
     - **Tier 1.** The `[[routes]]` keyword rules, as today (FS-15).
-    - **Tier 2.** A semantic match on the NUC's CPU, with a small local embedding model, against each route's command and example phrases, above a configured threshold.
+    - **Tier 2.** A semantic match on the NUC's CPU, with a small local embedding model, against each route's command and example phrases, above a configured threshold. The embedding model stays on the NUC, so this tier works while the server is away.
     - **Tier 3.** The server's language model, constrained to the closed list (IS-9).
 
     The rules layer admits a tier's answer only if all of these hold:
@@ -273,7 +278,7 @@ The **inference server** is a second program of autobot. It runs on `GAMEON1`, t
     - JSON validity against the schema;
     - latency to the first token and to the full answer.
 
-    It is how the language model of IS-10 is chosen. Reason: the tests of IS-12 use fakes and can say nothing about a real model's accuracy or speed. Typed utterances keep the owner's recordings out of the evaluation, as TS-5 requires.
+    It is how the language model of IS-10 is chosen: the candidate with the best route accuracy and JSON validity that stays within IS-4's latency budget wins, because routing correctness is what the rules layer depends on. Reason: the tests of IS-12 use fakes and can say nothing about a real model's accuracy or speed. Typed utterances keep the owner's recordings out of the evaluation, as TS-5 requires.
 
 27. **IS-27. Audio-native models are out of the first version.** Qwen2.5-Omni-3B's own README gives a theoretical minimum of 18.38 GB in BF16 (15 s of video), and Turing has no bfloat16, so the model cannot be resident beside the others on 11 GB. It may be tried later as an experiment profile, off by default, that unloads the other models and returns text only. Reason: the VRAM budget of IS-10 and the resident models of IS-24 leave no room for it.
 
@@ -303,7 +308,4 @@ The **inference server** is a second program of autobot. It runs on `GAMEON1`, t
 
 ## Open Questions
 
-- **Which model family wins `make server-eval`.** Recommended: the candidate of IS-10 with the best route accuracy and JSON validity that stays within IS-4's latency budget. Routing correctness is what the rules layer depends on.
-- **Whether tier 2's embedding model stays on the NUC once measured.** Recommended: it stays on the NUC unless its latency on the CPU breaks the 1.5 s budget of IS-4. On the NUC it works while the server is away.
-- **Whether Wake-on-LAN works.** Recommended: until it is tested, the NUC does not wake the server (IS-14) and treats a sleeping PC as down. Waking the owner's gaming PC is a change to IS-14 that he has to choose.
-- **Whether a neural voice later moves to the server.** Recommended: piper stays the only voice until a neural voice is measured within the VRAM budget of IS-10. piper is fast for short replies, and it is the fallback in any case.
+- **Which model family wins `make server-eval`.** Recommended: the candidate of IS-10 with the best route accuracy and JSON validity that stays within IS-4's latency budget. Routing correctness is what the rules layer depends on. The owner could not name a winner and accepted this as the criterion (recorded in IS-26); the winner is still to be measured.

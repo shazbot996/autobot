@@ -23,6 +23,9 @@ dist/
 run/
 models/
 
+# the owner's voice recordings: never committed, never leave the NUC
+data/
+
 # secrets
 .env
 .env.*

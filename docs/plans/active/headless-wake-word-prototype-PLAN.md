@@ -90,6 +90,8 @@ The wake-word engine is the thing being built, not a thing being chosen off a sh
 
 ## 6. The `openwakeword` engine and the `autobot` model
 
+> **Superseded** by `docs/plans/active/wake-word-training-studio-PLAN.md` (studio spec TS-2, TS-6 and TS-8; ADR 0006). The engine of this step stands. What no longer holds: synthetic clips as the training set, `make train-wakeword` writing `models/wakeword/autobot.onnx` directly, and the configuration switching to `kind = "openwakeword"` as part of this step. The text below is kept as the record of what was built.
+
 **Files:** new `src/autobot/listener/engines/openwakeword.py`, `src/autobot/wakeword/__init__.py`, `src/autobot/wakeword/train.py`, `tests/listener/test_openwakeword.py`; `config/autobot.toml`, `Makefile` (`train-wakeword`).
 
 - `engines/openwakeword.py` runs an openWakeWord model (ONNX, CPU) over each voiced 80 ms frame and fires when the score crosses the phrase's `threshold`, with a short refractory period so one utterance yields one event. This is the efficient 24x7 detector: a few percent of one core, no transcription.
@@ -99,6 +101,8 @@ The wake-word engine is the thing being built, not a thing being chosen off a sh
 **Done when:** `make train-wakeword` produces `models/wakeword/autobot.onnx`; with the config switched, `make up` on the NUC answers "hey autobot" and "yo autobot" aloud, ignores an hour of ordinary room conversation, and `make status` shows idle CPU well below the `text_match` figure recorded in step 3. The fixture tests pass for both kinds.
 
 ## 7. The terminal user interface
+
+> **Superseded** by `docs/plans/active/wake-word-training-studio-PLAN.md` (studio spec TS-1, TS-5 and TS-12; ADR 0006). The four screens of this step remain. What no longer holds: the interface as a control panel beside an application, the Audio screen saving clips into `tests/fixtures/audio/`, and the cloud placeholder screens. The text below is kept as the record of what was built.
 
 **Files:** new `src/autobot/tui/__init__.py`, `src/autobot/tui/app.py`, `src/autobot/tui/screens/audio.py`, `src/autobot/tui/screens/wake_phrase.py`, `src/autobot/tui/screens/service.py`, `src/autobot/tui/screens/host.py`; `Makefile` (`deploy`).
 

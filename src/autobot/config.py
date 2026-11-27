@@ -24,7 +24,13 @@ DEFAULT_CONFIG_PATH = Path("config/autobot.toml")
 # A wake phrase kind is the detector that implements the phrase.
 KIND_TEXT_MATCH = "text_match"
 KIND_OPENWAKEWORD = "openwakeword"
-WAKE_PHRASE_KINDS = (KIND_TEXT_MATCH, KIND_OPENWAKEWORD)
+# The no-training baseline: sherpa-onnx open-vocabulary keyword spotting. It
+# needs no `model`: its model is fetched into `models/sherpa-kws/`.
+KIND_SHERPA_KWS = "sherpa_kws"
+WAKE_PHRASE_KINDS = (KIND_TEXT_MATCH, KIND_OPENWAKEWORD, KIND_SHERPA_KWS)
+
+# The colour themes of the terminal user interface, in the order `T` cycles them.
+TUI_THEMES = ("light", "dark", "sun")
 
 # An audio device: a substring of a device name, or a numeric index.
 type DeviceSpec = str | int
@@ -58,7 +64,8 @@ class WakePhraseConfig:
     phrase: str
     kind: str
     target: str
-    # Model file path, relative to the repository root; empty for `text_match`.
+    # Model file path, relative to the repository root; `openwakeword` needs
+    # it, `text_match` and `sherpa_kws` do not use it.
     model: str = ""
     threshold: float = 0.5
 
@@ -71,7 +78,13 @@ class WakePhraseConfig:
 @dataclass(frozen=True)
 class AckConfig:
     text: str = "Yes?"
-    voice: str = "en_US-lessac-medium"
+    voice: str = "en_US-joe-medium"
+
+
+@dataclass(frozen=True)
+class TuiConfig:
+    # One of `TUI_THEMES`.
+    theme: str = "light"
 
 
 @dataclass(frozen=True)
@@ -80,6 +93,7 @@ class Config:
     audio: AudioConfig
     wake_phrases: tuple[WakePhraseConfig, ...]
     ack: AckConfig
+    tui: TuiConfig = TuiConfig()
     # The file the configuration was loaded from; None when built from a mapping.
     path: Path | None = None
 
@@ -131,7 +145,7 @@ def load_config(path: str | Path | None = None) -> Config:
 
 def parse_config(data: Mapping[str, object], path: Path | None = None) -> Config:
     """Validate parsed TOML and build the `Config`. Messages name the offending key."""
-    _reject_unknown(data, "", ("host", "audio", "wake_phrases", "ack"))
+    _reject_unknown(data, "", ("host", "audio", "wake_phrases", "ack", "tui"))
 
     host_table = _table(data, "host", required=False)
     _reject_unknown(host_table, "host", ("nuc_hostname",))
@@ -164,7 +178,22 @@ def parse_config(data: Mapping[str, object], path: Path | None = None) -> Config
         voice=_str(ack_table, "ack", "voice", default=AckConfig.voice, non_empty=True),
     )
 
-    return Config(host=host, audio=audio, wake_phrases=wake_phrases, ack=ack, path=path)
+    tui_table = _table(data, "tui", required=False)
+    _reject_unknown(tui_table, "tui", ("theme",))
+    theme = _str(tui_table, "tui", "theme", default=TuiConfig.theme)
+    if theme not in TUI_THEMES:
+        raise ConfigError(
+            f"[tui] theme = {theme!r} is not one of: {', '.join(TUI_THEMES)}"
+        )
+
+    return Config(
+        host=host,
+        audio=audio,
+        wake_phrases=wake_phrases,
+        ack=ack,
+        tui=TuiConfig(theme=theme),
+        path=path,
+    )
 
 
 def _wake_phrases(data: Mapping[str, object]) -> tuple[WakePhraseConfig, ...]:

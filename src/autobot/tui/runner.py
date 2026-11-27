@@ -5,6 +5,8 @@ Two shapes of command:
 - A `CommandTask` is a short command (a listener control action, playing the
   acknowledgement). It runs on a thread; the interface polls it and shows its
   output when it ends.
+- A `FunctionTask` is a slow Python function (scoring a model on the held-out
+  recordings). It runs on a thread and is polled like a command.
 - A `BackgroundJob` is a long one (`make train-wakeword`, which can run for
   hours). It runs in its own session with its output in a log file under
   `run/`, so the interface can show the log as it grows, be left, and even be
@@ -23,7 +25,7 @@ import signal
 import subprocess
 import sys
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -33,6 +35,18 @@ DEFAULT_TIMEOUT = 60.0
 LISTENER_CONTROL_MODULE = "autobot.listener.control"
 LISTENER_ACK_MODULE = "autobot.listener.ack"
 TRAIN_TARGET = "train-wakeword"
+# The main menu's question whether the listener runs: a short CPU sample, and
+# a timeout of its own, which is also how the test fakes tell it from the
+# Service screen's Status.
+LISTENER_STATUS_SAMPLE = 0.1
+LISTENER_STATUS_TIMEOUT = 10.0
+# Where `control snapshot` has the listener write the audio asked for,
+# relative to the repository root: the line the command prints on success.
+SNAPSHOT_FILE = Path("run/snapshot.wav")
+# `control snapshot` waits five seconds for the listener itself.
+SNAPSHOT_TIMEOUT = 15.0
+# Exit status of a command the owner cancelled.
+CANCELLED = 130
 
 
 @dataclass(frozen=True)
@@ -150,7 +164,7 @@ class CommandTask:
             output, _ = process.communicate()
         with self._lock:
             if self._cancelled:
-                self._result = CommandResult(130, "cancelled")
+                self._result = CommandResult(CANCELLED, "cancelled")
             elif timed_out:
                 self._result = CommandResult(
                     124, f"timed out after {self._timeout:g} s"
@@ -168,6 +182,60 @@ class CommandTask:
                 return
             self._cancelled = True
         _signal_group(self._process.pid, signal.SIGTERM)
+
+
+class FunctionTask:
+    """A slow Python function running on a thread, polled like a command.
+
+    The result is 0 with the function's return value in `value`, or 1 with
+    the one line of the exception it raised. A thread cannot be stopped, so
+    `cancel` only stops the waiting: `poll` then answers "cancelled" while
+    the function carries on, and `resume` goes back to waiting for it.
+    `inline=True` runs the function before returning, which is what tests
+    use: nothing then depends on a thread's timing.
+    """
+
+    def __init__(self, function: Callable[[], object], *, inline: bool = False) -> None:
+        self.value: object = None
+        self._result: CommandResult | None = None
+        self._abandoned = False
+        if inline:
+            self._run(function)
+        else:
+            threading.Thread(target=self._run, args=(function,), daemon=True).start()
+
+    def _run(self, function: Callable[[], object]) -> None:
+        try:
+            value = function()
+        # Whatever it raises is the result: an exception left to end the
+        # thread would leave the interface waiting for ever.
+        except Exception as error:  # noqa: BLE001
+            line = " ".join(str(error).split()) or type(error).__name__
+            self._result = CommandResult(1, line)
+            return
+        self.value = value
+        self._result = CommandResult(0, "")
+
+    @property
+    def finished(self) -> bool:
+        """Whether the function itself has ended, cancelled or not."""
+        return self._result is not None
+
+    def poll(self) -> CommandResult | None:
+        if self._result is not None:
+            return self._result
+        return CommandResult(CANCELLED, "cancelled") if self._abandoned else None
+
+    def cancel(self) -> None:
+        self._abandoned = True
+
+    def resume(self) -> None:
+        self._abandoned = False
+
+
+def spawn_function(function: Callable[[], object]) -> FunctionTask:
+    """Start `function` on a thread: the `Services.spawn` of a real run."""
+    return FunctionTask(function)
 
 
 class SubprocessRunner:
@@ -199,9 +267,21 @@ def module_available(name: str) -> bool:
         return False
 
 
-def listener_control_argv(action: str) -> list[str]:
-    """`python -m autobot.listener.control <action>` in this interpreter."""
-    return [sys.executable, "-m", LISTENER_CONTROL_MODULE, action]
+def listener_control_argv(action: str, *arguments: str) -> list[str]:
+    """`python -m autobot.listener.control <action> [arguments]` in this interpreter."""
+    return [sys.executable, "-m", LISTENER_CONTROL_MODULE, action, *arguments]
+
+
+def listener_snapshot_argv(stretch: int | None) -> list[str]:
+    """`control snapshot` for one stretch, or for the ten-second buffer (None)."""
+    if stretch is None:
+        return listener_control_argv("snapshot", "--buffer")
+    return listener_control_argv("snapshot", "--stretch", str(stretch))
+
+
+def listener_status_argv() -> list[str]:
+    """`control status` with a short CPU sample: only whether it runs is wanted."""
+    return [*listener_control_argv("status"), "--sample", f"{LISTENER_STATUS_SAMPLE:g}"]
 
 
 def listener_ack_argv() -> list[str]:

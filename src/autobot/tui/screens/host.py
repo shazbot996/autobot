@@ -10,6 +10,8 @@ from autobot.tui.ui import Canvas, Rect, fit
 
 class HostScreen(MenuView):
     title = "Host"
+    facts_title = "This machine"
+    panel_rows = 4
 
     def is_nuc(self) -> bool:
         nuc = self.app.config.host.nuc_hostname

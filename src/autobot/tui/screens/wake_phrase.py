@@ -15,15 +15,19 @@ from autobot.tui.app import KEYS_ENTER, MenuView, View
 from autobot.tui.config_edit import Change
 from autobot.tui.menu import MenuItem
 from autobot.tui.runner import LISTENER_ACK_MODULE, listener_ack_argv
+from autobot.tui.screens.candidate import CandidateScreen
+from autobot.tui.state import candidate_exists
 from autobot.tui.ui import Canvas, Rect, fit
 
 DEFAULT_MODEL = "models/wakeword/autobot.onnx"
 THRESHOLD_STEP = 0.05
 TABLE = "wake_phrases"
+CANDIDATE_QUESTION = "Candidate ready: compare and install?"
 
 KIND_NOTES = {
     "text_match": "text_match: the local transcript contains the phrase",
     "openwakeword": "openwakeword: a trained model file scores the audio",
+    "sherpa_kws": "sherpa_kws: an untrained keyword spotter, the baseline",
 }
 
 
@@ -46,6 +50,8 @@ def step_threshold(current: float, steps: int) -> float:
 
 class WakePhraseScreen(MenuView):
     title = "Wake phrase"
+    help_lines = ("+, -           move the threshold by one step (also Right, Left)",)
+    facts_title = "Phrase"
 
     def enter(self) -> None:
         self.index = 0
@@ -65,7 +71,7 @@ class WakePhraseScreen(MenuView):
         if phrase.kind != KIND_OPENWAKEWORD:
             return False
         # Relative to the repository root, as `WakePhraseConfig.model_path` is.
-        path = self.app.services.repo / Path(phrase.model).expanduser()
+        path = self.app.services.models_root / Path(phrase.model).expanduser()
         return not phrase.model or not path.is_file()
 
     def warn_if_model_missing(self) -> None:
@@ -163,6 +169,7 @@ class WakePhraseScreen(MenuView):
         else:
             model, role = phrase.model, "value"
         job = self.app.services.train_job
+        ready = candidate_exists(self.app.services.models_root)
         return [
             ("Phrase", f"{phrase.phrase}  ({self.index + 1} of {count})", "value"),
             ("Kind", phrase.kind, "value"),
@@ -173,6 +180,11 @@ class WakePhraseScreen(MenuView):
                 "Training",
                 f"running (pid {job.pid()})" if job.running() else "not running",
                 "value",
+            ),
+            (
+                "Candidate",
+                "ready: see Candidate, main menu" if ready else "none",
+                "ok" if ready else "dim",
             ),
         ]
 
@@ -194,7 +206,7 @@ class WakePhraseScreen(MenuView):
             MenuItem(
                 "Train the wake-word model",
                 lambda: self.app.push(TrainScreen(self.app)),
-                "Runs `make train-wakeword` and shows its progress",
+                "Runs `make train-wakeword` (it writes a candidate) and shows the log",
             ),
             MenuItem(
                 "Play the acknowledgement",
@@ -218,18 +230,66 @@ class WakePhraseScreen(MenuView):
         return True
 
     def key_bar(self) -> list[tuple[str, str]]:
-        return [*super().key_bar()[:3], ("+/-", "Threshold"), *super().key_bar()[3:]]
+        return [*super().key_bar()[:3], ("+/-", "Adjust"), *super().key_bar()[3:]]
 
 
 class TrainScreen(View):
     """`make train-wakeword`, with its output scrolling as it arrives."""
 
     title = "Train the wake-word model"
+    help_lines = (
+        "Enter, S       start the training (hours, in the background)",
+        "C              cancel a running training (asks first)",
+        "Up, Down       scroll the log (also PgUp, PgDn); End follows it",
+        "",
+        "Esc leaves it running: the run writes a candidate when it ends.",
+        "",
+    )
 
     def enter(self) -> None:
         # Lines scrolled back from the end of the log; 0 follows the output.
         self.scroll = 0
         self.page = 10
+        # Whether the job was running at the last frame, to see it end.
+        self.was_running = self.app.services.train_job.running()
+
+    def tick(self) -> None:
+        job = self.app.services.train_job
+        running = job.running()
+        ended = self.was_running and not running
+        # Set first: the dialog of `finished` runs this again every frame.
+        self.was_running = running
+        if ended and job.returncode == 0:
+            self.finished()
+
+    def finished(self) -> None:
+        """The training ended with status 0 while this pane was open.
+
+        Offers the hand-off to the Candidate screen, where the candidate is
+        compared and installed; nothing is installed here.
+        """
+        app = self.app
+        if not candidate_exists(app.services.models_root):
+            app.say(
+                "Training finished, but it left no candidate: see the log.", "warning"
+            )
+            return
+        if app.confirm(
+            "Training finished",
+            [
+                "The training run wrote a candidate.",
+                "Nothing is installed until you say so.",
+                "",
+                CANDIDATE_QUESTION,
+            ],
+            default=True,
+        ):
+            app.push(CandidateScreen(app))
+        else:
+            app.say(
+                "Training finished. The candidate is ready: see Candidate, main menu.",
+                "ok",
+            )
 
     def start(self) -> None:
         app = self.app
@@ -243,6 +303,7 @@ class TrainScreen(View):
             app.error(f"Cannot start the training: {error}")
             return
         self.scroll = 0
+        self.was_running = True
         app.say("Training started. Esc leaves it running.", "ok")
 
     def cancel(self) -> None:
@@ -312,9 +373,7 @@ class TrainScreen(View):
         return True
 
     def hint(self) -> str:
-        return (
-            "Training can run for hours. Esc leaves it running; the log stays in run/."
-        )
+        return "The run writes a candidate, installs nothing. Esc leaves it running."
 
     def key_bar(self) -> list[tuple[str, str]]:
         return [

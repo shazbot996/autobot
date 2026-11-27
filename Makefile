@@ -4,20 +4,14 @@
 # rule line; the `help` target builds the summary from those comments, so a new
 # target appears in the summary as soon as it has one.
 #
-# Each target lives in its own block between `# ---` rules. A plan step that
-# builds a stubbed target replaces only that target's block.
+# Each target lives in its own block between `# ---` rules. Every target here
+# is built: none is a stub.
 
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
 VENV   := .venv
 PYTHON := $(VENV)/bin/python
-PLAN   := docs/plans/active/headless-wake-word-prototype-PLAN.md
-
-# $(call not_built,N): the body of a target whose plan step N has not landed.
-define not_built
-	@echo "not built yet: see $(PLAN) step $(1)" >&2; exit 1
-endef
 
 # Fails with one line when `make setup` has not been run.
 .PHONY: venv-check
@@ -30,7 +24,7 @@ help: ## Print this summary of the available commands
 	@echo "autobot: make targets"
 	@grep -hE '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) \
 		| awk -F ':.*## ' '{ printf "  %-15s %s\n", $$1, $$2 }'
-	@echo "No front-end targets exist: this build is headless."
+	@echo "\`make deploy\` opens the application: the full-screen terminal user interface."
 
 # --- setup ------------------------------------------------------------------
 .PHONY: setup
@@ -91,7 +85,7 @@ audio-check: venv-check ## Check the NUC's audio hardware: list devices, record 
 
 # --- deploy -----------------------------------------------------------------
 .PHONY: deploy
-deploy: venv-check ## Open the terminal user interface: audio, wake phrase, service, host
+deploy: venv-check ## Open the application: the wake-word training studio and the settings screens
 	@$(PYTHON) -m autobot.tui
 
 # --- fetch-models -----------------------------------------------------------
@@ -105,15 +99,23 @@ fetch-models: venv-check ## Fetch the model files into models/ (TRAIN=1 adds the
 	@$(PYTHON) -m autobot.fetch_models $(if $(TRAIN),--training --acav-gb $(ACAV_GB))
 
 # --- train-wakeword ---------------------------------------------------------
-# Trains models/wakeword/<phrase>.onnx on the CPU. It takes hours and is
-# resumable: run it again and it carries on. Variables:
+# Trains the wake-word model on the CPU and writes it as a candidate
+# (models/wakeword/candidate.onnx and candidate.json), which the interface
+# (`make deploy`) compares and installs: the installed model and
+# config/autobot.toml are never touched here. The recordings in data/voice/ are
+# trained on beside the synthetic speech, with the held-out share kept for the
+# evaluation; with no recordings it trains on synthetic speech alone. The first
+# run takes hours and is resumable: run it again and it carries on. Once the
+# synthetic speech is cached a run takes about half an hour. Variables:
 #   SCALE    how much speech to synthesise (1 is about 23,000 clips and takes
 #            about 25 minutes; a larger SCALE keeps what a smaller one made)
 #   STEPS    training steps
 #   THREADS  worker processes
 #   ACAV_GB  gigabytes of openWakeWord's negative features to fetch and use
 #   PHRASE   the wake phrase (default: the first one in config/autobot.toml)
-#   TRAIN_ARGS  anything else for `python -m autobot.wakeword.train`
+#   TRAIN_ARGS  anything else for `python -m autobot.wakeword.train`, such as
+#            --no-exclude-near-homophones (train on the sound-alikes that are
+#            left out by default) or --dataset DIR (another voice dataset)
 # The first run installs the `train` extra into .venv (the CPU build of torch)
 # and fetches the training data; after that nothing is downloaded.
 SCALE   ?= 10
@@ -121,7 +123,7 @@ STEPS   ?= 50000
 THREADS ?= 8
 TORCH_INDEX := https://download.pytorch.org/whl/cpu
 .PHONY: train-wakeword
-train-wakeword: venv-check ## Train the wake-word model; hours, resumable (SCALE=10 STEPS=50000 THREADS=8 ACAV_GB=12)
+train-wakeword: venv-check ## Train a wake-word candidate for the interface to install; hours, resumable (SCALE=10 STEPS=50000 THREADS=8 ACAV_GB=12)
 	@$(PYTHON) -c "import onnx, scipy, soundfile, torch" 2>/dev/null || { \
 		echo "installing the training extras into $(VENV) (CPU torch)"; \
 		$(PYTHON) -m pip install --quiet --index-url $(TORCH_INDEX) torch \

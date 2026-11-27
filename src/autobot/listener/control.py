@@ -6,6 +6,7 @@
     down       stop the listener
     status     show whether it runs, its uptime, CPU and memory
     logs       print the end of the log (`--follow` keeps following it)
+    snapshot   have the running listener write audio it holds to run/snapshot.wav
     install    install the systemd user unit (does not start or enable it)
     uninstall  stop, disable and remove the unit
     enable     start the unit at boot: enable it and turn lingering on
@@ -27,6 +28,25 @@ Two modes, one set of commands:
 
 The unit file is rendered from the template `deploy/autobot-listener.service`
 by replacing `@REPO_ROOT@` with this checkout's path.
+
+`snapshot` is how the live monitor gets the audio a mark is about (studio
+spec rule TS-9). The listener holds the last five stretches of speech and the
+last ten seconds of microphone audio in memory and writes neither anywhere on
+its own:
+
+    snapshot --stretch ID   the stretch with that identifier (the `stretch`
+                            of its `score` event), with its pre-roll
+    snapshot --buffer       the last ten seconds of microphone audio
+
+It works the same in both modes. It removes an earlier `run/snapshot.wav`,
+writes the request (the identifier, or `buffer`) to `run/snapshot.request`,
+sends the listener `SIGUSR1` and waits up to five seconds. On success it
+prints `run/snapshot.wav`, a 16 kHz mono 16-bit WAV, and exits 0. Otherwise
+it exits 1 with one line on stderr: the listener is not running, or the
+listener's own reason, which it hands back in `run/snapshot.error` (the
+stretch is no longer held, nothing has been heard yet), or that nothing came
+within the five seconds. One snapshot at a time: the file is overwritten by
+the next, so read it before asking again.
 """
 
 from __future__ import annotations
@@ -45,7 +65,13 @@ from pathlib import Path
 
 from autobot.config import ConfigError, load_config, repo_root, resolve_repo_path
 from autobot.listener.audio import AudioError, require_nuc
-from autobot.listener.service import READY_MESSAGE
+from autobot.listener.events import SOCKET_PATH
+from autobot.listener.service import (
+    READY_MESSAGE,
+    SNAPSHOT_BUFFER,
+    SNAPSHOT_FILE,
+    snapshot_paths,
+)
 
 UNIT_NAME = "autobot-listener.service"
 UNIT_TEMPLATE = Path("deploy") / UNIT_NAME
@@ -59,6 +85,7 @@ START_TIMEOUT_SECONDS = 45.0
 STOP_TIMEOUT_SECONDS = 10.0
 DEFAULT_LOG_LINES = 40
 DEFAULT_SAMPLE_SECONDS = 1.0
+SNAPSHOT_TIMEOUT_SECONDS = 5.0
 
 
 class ControlError(Exception):
@@ -425,6 +452,76 @@ def cmd_logs(args: argparse.Namespace) -> int:
     return 0
 
 
+def listener_pid() -> int | None:
+    """The pid of the running listener, in service or foreground mode."""
+    pid = service_pid() if unit_installed() else None
+    return pid if pid is not None else foreground_pid()
+
+
+def cmd_snapshot(args: argparse.Namespace) -> int:
+    pid = listener_pid()
+    # No socket yet means it is still starting, and has nothing to give.
+    if pid is None or not resolve_repo_path(SOCKET_PATH).exists():
+        raise ControlError("the listener is not running")
+    request = SNAPSHOT_BUFFER if args.buffer else str(args.stretch)
+    request_path, wav_path, error_path = snapshot_paths(resolve_repo_path(RUN_DIR))
+    try:
+        # An answer to an earlier request must not be taken for this one's.
+        wav_path.unlink(missing_ok=True)
+        error_path.unlink(missing_ok=True)
+        temporary = request_path.with_name(request_path.name + ".tmp")
+        temporary.write_text(request + "\n")
+        os.replace(temporary, request_path)
+        asked = request_path.stat().st_mtime_ns
+    except OSError as error:
+        raise ControlError(
+            f"cannot write the snapshot request in {RUN_DIR}: {error.strerror}"
+        ) from None
+    try:
+        os.kill(pid, signal.SIGUSR1)
+    except ProcessLookupError:
+        request_path.unlink(missing_ok=True)
+        raise ControlError("the listener is not running") from None
+    deadline = time.monotonic() + SNAPSHOT_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        # Both files are renamed into place, so one that exists is whole.
+        try:
+            reason = error_path.read_text().strip()
+        except OSError:
+            reason = ""
+        if reason:
+            error_path.unlink(missing_ok=True)
+            raise ControlError(reason.splitlines()[0])
+        try:
+            fresh = wav_path.stat().st_mtime_ns >= asked
+        except OSError:
+            fresh = False
+        if fresh:
+            print(SNAPSHOT_FILE)
+            return 0
+        if not is_listener(pid):
+            request_path.unlink(missing_ok=True)
+            raise ControlError("the listener is not running")
+        time.sleep(0.05)
+    request_path.unlink(missing_ok=True)
+    raise ControlError(
+        f"the listener did not write {SNAPSHOT_FILE} within "
+        f"{SNAPSHOT_TIMEOUT_SECONDS:g} s"
+    )
+
+
+def _stretch_identifier(text: str) -> int:
+    try:
+        identifier = int(text)
+    except ValueError:
+        identifier = 0
+    if identifier < 1:
+        raise argparse.ArgumentTypeError(
+            f"{text!r} is not a stretch identifier (a whole number from 1)"
+        )
+    return identifier
+
+
 def cmd_install(args: argparse.Namespace) -> int:
     require_nuc(load_config(), "the listener service")
     root = repo_root()
@@ -543,6 +640,23 @@ def build_parser() -> argparse.ArgumentParser:
     logs.add_argument("-n", "--lines", type=int, default=DEFAULT_LOG_LINES)
     logs.add_argument("-f", "--follow", action="store_true", help="keep following")
     logs.set_defaults(run=cmd_logs)
+    snapshot = commands.add_parser(
+        "snapshot",
+        help="write audio the running listener holds to run/snapshot.wav",
+    )
+    which = snapshot.add_mutually_exclusive_group(required=True)
+    which.add_argument(
+        "--stretch",
+        type=_stretch_identifier,
+        metavar="ID",
+        help="the stretch with this identifier, with its pre-roll",
+    )
+    which.add_argument(
+        "--buffer",
+        action="store_true",
+        help="the last ten seconds of microphone audio",
+    )
+    snapshot.set_defaults(run=cmd_snapshot)
     commands.add_parser("install", help="install the systemd user unit").set_defaults(
         run=cmd_install
     )

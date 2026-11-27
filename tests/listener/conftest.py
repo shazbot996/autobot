@@ -206,3 +206,31 @@ def run_clip(pipeline: Pipeline, name: str) -> list[WakeEvent]:
     for frame in [*load_clip(name), *silence(12)]:
         events.extend(pipeline.process(frame))
     return events
+
+
+# --- the `sherpa_kws` kind -----------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def sherpa_kws_model(models: None) -> Path:
+    """The sherpa-onnx keyword-spotting model's directory; fails when it is missing."""
+    from autobot.listener.engines.sherpa_kws import SHERPA_KWS_DIR, SHERPA_KWS_FILES
+
+    try:
+        return require_dir(
+            SHERPA_KWS_DIR, "sherpa-onnx keyword spotter", SHERPA_KWS_FILES
+        )
+    except ModelMissingError as error:
+        pytest.fail(
+            f"{error}. The sherpa_kws tests need the model in place; "
+            "a test run never downloads one.",
+            pytrace=False,
+        )
+
+
+@pytest.fixture
+def sherpa_kws_pipeline(sherpa_kws_model: Path) -> Iterator[Pipeline]:
+    """The service's own frame path, real VAD and the real model, for `sherpa_kws`."""
+    pipeline = build_pipeline(make_config("sherpa_kws"))
+    yield pipeline
+    pipeline.reset()

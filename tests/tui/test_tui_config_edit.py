@@ -169,6 +169,31 @@ def test_a_missing_file_is_a_config_error(tmp_path: Path) -> None:
         )
 
 
+def test_the_theme_is_written_into_its_table(tmp_path: Path) -> None:
+    path = tmp_path / "autobot.toml"
+    path.write_text(CONFIG_TEXT, encoding="utf-8")
+    config = ConfigStore(path).update(Change("tui", "theme", "dark"))
+    assert config.tui.theme == "dark"
+    text = path.read_text(encoding="utf-8")
+    assert text == CONFIG_TEXT.replace('theme = "light"', 'theme = "dark"')
+    with pytest.raises(ConfigError, match=r"\[tui\] theme = 'neon'"):
+        ConfigStore(path).update(Change("tui", "theme", "neon"))
+    assert path.read_text(encoding="utf-8") == text
+
+
+def test_the_theme_table_is_added_to_a_file_without_one(tmp_path: Path) -> None:
+    # A config file written before the themes existed has no [tui] table.
+    old = CONFIG_TEXT[: CONFIG_TEXT.index("[tui]")]
+    path = tmp_path / "autobot.toml"
+    path.write_text(old, encoding="utf-8")
+    assert ConfigStore(path).load().tui.theme == "light"
+    assert ConfigStore(path).update(Change("tui", "theme", "sun")).tui.theme == "sun"
+    text = path.read_text(encoding="utf-8")
+    assert text.startswith(old.rstrip("\n"))
+    assert text.endswith('[tui]\ntheme = "sun"\n')
+    assert comments(text) == comments(old)
+
+
 def test_the_real_config_file_round_trips() -> None:
     text = (repo_root() / "config" / "autobot.toml").read_text(encoding="utf-8")
     new = apply_changes(
@@ -177,6 +202,7 @@ def test_the_real_config_file_round_trips() -> None:
             Change("host", "nuc_hostname", "elsewhere"),
             Change("audio", "input_device", "default"),
             Change("wake_phrases", "threshold", 0.7, 0),
+            Change("tui", "theme", "sun"),
         ],
     )
     assert comments(new) == comments(text)
@@ -185,3 +211,4 @@ def test_the_real_config_file_round_trips() -> None:
     assert data["host"]["nuc_hostname"] == "elsewhere"
     assert data["audio"]["input_device"] == "default"
     assert data["wake_phrases"][0]["threshold"] == 0.7
+    assert data["tui"]["theme"] == "sun"

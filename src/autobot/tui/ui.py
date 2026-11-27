@@ -1,9 +1,9 @@
-"""Drawing primitives: the colour theme, the line-drawing glyphs, the canvas.
+"""Drawing primitives: the theme's roles, the line-drawing glyphs, the canvas.
 
 Everything the interface draws goes through `Canvas.put`, which clips to the
 terminal and never raises, so a resize or a tiny terminal cannot crash a
 screen. `Canvas` only needs `getmaxyx`, `addstr`, `erase` and `refresh` from
-the screen it is given, which is what lets tests drive the whole interface
+the screen it is given (the application also sets its background with `bkgd`), which is what lets tests drive the whole interface
 with a fake screen instead of a terminal.
 """
 
@@ -11,9 +11,12 @@ from __future__ import annotations
 
 import curses
 import textwrap
-from collections.abc import Sequence
-from dataclasses import dataclass
-from typing import Any
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, fields
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from autobot.tui.themes import Palette
 
 
 @dataclass(frozen=True)
@@ -40,9 +43,19 @@ class Rect:
         )
 
 
+# Builds one curses colour pair: (pair number, foreground, background).
+type InitPair = Callable[[int, int, int], None]
+# The attribute of a colour pair, by number.
+type ColourPair = Callable[[int], int]
+
+
 @dataclass(frozen=True)
 class Theme:
-    """Curses attributes, by role."""
+    """Curses attributes, by role.
+
+    A screen asks for a role, never for a colour, so a theme is only a
+    palette (`autobot.tui.themes`): `from_palette` turns one into attributes.
+    """
 
     normal: int
     title: int
@@ -64,6 +77,20 @@ class Theme:
     meter_low: int
     meter_mid: int
     meter_high: int
+    # The banner's block letters, and the line beside them.
+    banner: int
+    accent: int
+    # The single-line frames of the panels inside a screen.
+    panel: int
+    # The text a recording session asks for, in its box.
+    prompt: int
+    # The listener's state, as a filled badge.
+    badge_ok: int
+    badge_warning: int
+    badge_error: int
+    badge_info: int
+    # The palette's name; empty for the mono theme.
+    name: str = ""
 
     @classmethod
     def mono(cls) -> Theme:
@@ -91,49 +118,49 @@ class Theme:
             meter_low=curses.A_NORMAL,
             meter_mid=bold,
             meter_high=bold,
+            banner=bold,
+            accent=curses.A_NORMAL,
+            panel=curses.A_NORMAL,
+            prompt=reverse | bold,
+            badge_ok=reverse,
+            badge_warning=reverse,
+            badge_error=reverse | bold,
+            badge_info=reverse,
         )
 
     @classmethod
-    def colour(cls) -> Theme:
-        """The 90s palette: white on blue, cyan bars. Needs curses started."""
-        pairs = {
-            1: (curses.COLOR_WHITE, curses.COLOR_BLUE),
-            2: (curses.COLOR_BLACK, curses.COLOR_CYAN),
-            3: (curses.COLOR_WHITE, curses.COLOR_BLACK),
-            4: (curses.COLOR_YELLOW, curses.COLOR_BLUE),
-            5: (curses.COLOR_WHITE, curses.COLOR_RED),
-            6: (curses.COLOR_BLACK, curses.COLOR_WHITE),
-            7: (curses.COLOR_GREEN, curses.COLOR_BLUE),
-            8: (curses.COLOR_RED, curses.COLOR_BLUE),
-            9: (curses.COLOR_CYAN, curses.COLOR_BLUE),
-            10: (curses.COLOR_RED, curses.COLOR_WHITE),
-        }
-        for number, (foreground, background) in pairs.items():
-            curses.init_pair(number, foreground, background)
-        pair = curses.color_pair
-        bold = curses.A_BOLD
-        return cls(
-            normal=pair(1),
-            title=pair(2),
-            key=pair(3) | bold,
-            key_label=pair(2),
-            selected=pair(2),
-            frame=pair(9) | bold,
-            heading=pair(4) | bold,
-            value=pair(1) | bold,
-            dim=pair(9),
-            warning=pair(4) | bold,
-            error=pair(5) | bold,
-            ok=pair(7) | bold,
-            dialog=pair(6),
-            dialog_selected=pair(3) | bold,
-            dialog_error=pair(10),
-            field=pair(3) | bold,
-            shadow=pair(3),
-            meter_low=pair(7) | bold,
-            meter_mid=pair(4) | bold,
-            meter_high=pair(8) | bold,
-        )
+    def from_palette(
+        cls,
+        palette: Palette,
+        init_pair: InitPair | None = None,
+        colour_pair: ColourPair | None = None,
+    ) -> Theme:
+        """The attributes of `palette`, after initialising its colour pairs.
+
+        Pairs are numbered from 1 in the order the roles first use them, so
+        switching palettes redefines the same few pairs. Needs curses started
+        with colours, unless `init_pair` and `colour_pair` stand in for it
+        (tests do that).
+        """
+        init_pair = init_pair or curses.init_pair
+        colour_pair = colour_pair or curses.color_pair
+        numbers: dict[tuple[int, int], int] = {}
+        attributes: dict[str, int] = {}
+        for role in theme_roles():
+            ink = palette.inks[role]
+            colours = (ink.foreground, ink.background)
+            if colours not in numbers:
+                numbers[colours] = len(numbers) + 1
+                init_pair(numbers[colours], *colours)
+            attributes[role] = colour_pair(numbers[colours]) | (
+                curses.A_BOLD if ink.bold else 0
+            )
+        return cls(name=palette.name, **attributes)
+
+
+def theme_roles() -> tuple[str, ...]:
+    """The roles a palette must colour: every `Theme` field but its name."""
+    return tuple(field.name for field in fields(Theme) if field.name != "name")
 
 
 @dataclass(frozen=True)
@@ -151,10 +178,22 @@ class Glyphs:
     pointer: str
     bullet: str
     up_down: str
+    # The single-line frame of a panel inside a screen; its edge is `rule`.
+    panel_top_left: str = "+"
+    panel_top_right: str = "+"
+    panel_bottom_left: str = "+"
+    panel_bottom_right: str = "+"
+    panel_vertical: str = "|"
+    # Whether block letters (the banner) can be drawn.
+    block_art: bool = False
 
     @classmethod
     def unicode(cls) -> Glyphs:
-        return cls("╔", "╗", "╚", "╝", "═", "║", "─", "█", "░", "▌", "►", "●", "↑↓")
+        return cls(
+            *("╔", "╗", "╚", "╝", "═", "║", "─", "█", "░", "▌", "►", "●", "↑↓"),
+            *("┌", "┐", "└", "┘", "│"),
+            block_art=True,
+        )
 
     @classmethod
     def ascii(cls) -> Glyphs:
@@ -214,27 +253,69 @@ class Canvas:
 
     def box(self, rect: Rect, title: str = "", attr: int | None = None) -> None:
         """A double-line frame around `rect`, with the title set into the top edge."""
+        glyphs = self.glyphs
+        self._frame(
+            rect,
+            title,
+            attr,
+            (glyphs.top_left, glyphs.top_right),
+            (glyphs.bottom_left, glyphs.bottom_right),
+            glyphs.horizontal,
+            glyphs.vertical,
+        )
+
+    def panel(
+        self,
+        rect: Rect,
+        title: str = "",
+        attr: int | None = None,
+        title_attr: int | None = None,
+    ) -> Rect:
+        """A single-line frame around `rect`, for a panel inside a screen.
+
+        Returns the inside, one column in from the frame on each side.
+        """
+        glyphs = self.glyphs
+        self._frame(
+            rect,
+            title,
+            self.theme.panel if attr is None else attr,
+            (glyphs.panel_top_left, glyphs.panel_top_right),
+            (glyphs.panel_bottom_left, glyphs.panel_bottom_right),
+            glyphs.rule,
+            glyphs.panel_vertical,
+            title_attr,
+        )
+        return rect.inset(1, 2)
+
+    def _frame(
+        self,
+        rect: Rect,
+        title: str,
+        attr: int | None,
+        top: tuple[str, str],
+        bottom: tuple[str, str],
+        horizontal: str,
+        vertical: str,
+        title_attr: int | None = None,
+    ) -> None:
         if rect.height < 2 or rect.width < 2:
             return
-        glyphs = self.glyphs
         inner = rect.width - 2
-        self.put(
-            rect.y,
-            rect.x,
-            glyphs.top_left + glyphs.horizontal * inner + glyphs.top_right,
-            attr,
-        )
+        self.put(rect.y, rect.x, top[0] + horizontal * inner + top[1], attr)
         for row in range(rect.y + 1, rect.bottom - 1):
-            self.put(row, rect.x, glyphs.vertical, attr)
-            self.put(row, rect.right - 1, glyphs.vertical, attr)
+            self.put(row, rect.x, vertical, attr)
+            self.put(row, rect.right - 1, vertical, attr)
         self.put(
-            rect.bottom - 1,
-            rect.x,
-            glyphs.bottom_left + glyphs.horizontal * inner + glyphs.bottom_right,
-            attr,
+            rect.bottom - 1, rect.x, bottom[0] + horizontal * inner + bottom[1], attr
         )
         if title and inner > 4:
-            self.put(rect.y, rect.x + 2, f" {title[: inner - 4]} ", attr)
+            self.put(
+                rect.y,
+                rect.x + 2,
+                f" {title[: inner - 4]} ",
+                attr if title_attr is None else title_attr,
+            )
 
 
 def wrap(lines: Sequence[str], width: int) -> list[str]:

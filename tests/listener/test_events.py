@@ -11,7 +11,12 @@ from pathlib import Path
 import pytest
 
 from autobot.listener.detector import WakeEvent
-from autobot.listener.events import AlreadyRunningError, EventPublisher, to_json_line
+from autobot.listener.events import (
+    AlreadyRunningError,
+    EventPublisher,
+    ScoreEvent,
+    to_json_line,
+)
 
 from .conftest import FIXED_TIME
 
@@ -24,6 +29,17 @@ EXPECTED = {
     "target": "ack",
     "kind": "text_match",
     "score": 0.79,
+    "at": "2026-11-25T21:30:00.500+00:00",
+}
+SCORE = ScoreEvent(
+    phrase="autobot", kind="openwakeword", score=0.912, stretch=7, at=FIXED_TIME
+)
+EXPECTED_SCORE = {
+    "event": "score",
+    "phrase": "autobot",
+    "kind": "openwakeword",
+    "score": 0.912,
+    "stretch": 7,
     "at": "2026-11-25T21:30:00.500+00:00",
 }
 
@@ -39,6 +55,49 @@ def test_the_json_line_is_one_line_with_the_event_fields() -> None:
     line = to_json_line(EVENT)
     assert "\n" not in line
     assert json.loads(line) == EXPECTED
+
+
+def test_the_json_line_of_a_score_event_carries_its_stretch() -> None:
+    line = to_json_line(SCORE)
+    assert "\n" not in line
+    assert json.loads(line) == EXPECTED_SCORE
+    # The field order is part of the documented line.
+    assert list(json.loads(line)) == [
+        "event",
+        "phrase",
+        "kind",
+        "score",
+        "stretch",
+        "at",
+    ]
+
+
+def test_a_detector_with_no_score_for_the_stretch_gives_null() -> None:
+    silent = ScoreEvent("autobot", "text_match", None, 3, FIXED_TIME)
+    assert json.loads(to_json_line(silent)) == {
+        **EXPECTED_SCORE,
+        "kind": "text_match",
+        "score": None,
+        "stretch": 3,
+    }
+    assert '"score": null' in to_json_line(silent)
+
+
+def test_a_score_event_goes_to_the_socket_and_not_to_the_log(tmp_path: Path) -> None:
+    path = tmp_path / "listener.sock"
+    log = io.StringIO()
+    with EventPublisher(path, log) as publisher:
+        reader = connect(path)
+        try:
+            publisher.publish(SCORE)
+            publisher.publish(EVENT)
+            with reader.makefile() as stream:
+                assert json.loads(stream.readline()) == EXPECTED_SCORE
+                assert json.loads(stream.readline()) == EXPECTED
+        finally:
+            reader.close()
+    # Only the wake reached the log.
+    assert [json.loads(line) for line in log.getvalue().splitlines()] == [EXPECTED]
 
 
 def test_publish_with_no_reader_writes_the_log_and_does_not_block(

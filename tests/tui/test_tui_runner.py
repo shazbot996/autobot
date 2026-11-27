@@ -1,6 +1,7 @@
 """`autobot.tui.runner`: commands and background jobs, with harmless real processes."""
 
 import sys
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -8,11 +9,15 @@ from pathlib import Path
 import pytest
 
 from autobot.tui.runner import (
+    CANCELLED,
+    SNAPSHOT_FILE,
     BackgroundJob,
     CommandResult,
+    FunctionTask,
     SubprocessRunner,
     listener_ack_argv,
     listener_control_argv,
+    listener_snapshot_argv,
     module_available,
     run_command,
     tail_lines,
@@ -194,3 +199,63 @@ def test_a_job_whose_command_is_missing_says_so(tmp_path: Path) -> None:
         RuntimeError, match="command not found: autobot-no-such-command"
     ):
         job(tmp_path).start(["autobot-no-such-command"])
+
+
+def test_the_snapshot_command_names_a_stretch_or_the_buffer() -> None:
+    control = [sys.executable, "-m", "autobot.listener.control"]
+    assert listener_control_argv("snapshot", "--stretch", "7") == [
+        *control,
+        "snapshot",
+        "--stretch",
+        "7",
+    ]
+    assert listener_snapshot_argv(7) == [*control, "snapshot", "--stretch", "7"]
+    assert listener_snapshot_argv(None) == [*control, "snapshot", "--buffer"]
+    assert Path("run/snapshot.wav") == SNAPSHOT_FILE
+
+
+def test_a_function_task_runs_on_a_thread_and_keeps_the_value() -> None:
+    release = threading.Event()
+
+    def slow() -> str:
+        release.wait(10)
+        return "scored"
+
+    task = FunctionTask(slow)
+    assert task.poll() is None
+    assert not task.finished
+    release.set()
+    wait_until(lambda: task.poll() is not None)
+    assert task.poll() == CommandResult(0, "")
+    assert task.finished
+    assert task.value == "scored"
+
+
+def test_a_function_task_that_raises_is_one_line() -> None:
+    def broken() -> None:
+        raise ValueError("the model\nis not usable")
+
+    task = FunctionTask(broken, inline=True)
+    assert task.poll() == CommandResult(1, "the model is not usable")
+    assert task.value is None
+
+    def silent() -> None:
+        raise KeyError
+
+    assert FunctionTask(silent, inline=True).poll() == CommandResult(1, "KeyError")
+
+
+def test_cancelling_a_function_task_stops_the_waiting_not_the_function() -> None:
+    release = threading.Event()
+    task = FunctionTask(lambda: release.wait(10) and "late")
+    task.cancel()
+    cancelled = task.poll()
+    assert cancelled is not None and cancelled.returncode == CANCELLED
+    assert not task.finished
+    # Waiting again picks the same run up.
+    task.resume()
+    assert task.poll() is None
+    release.set()
+    wait_until(lambda: task.finished)
+    assert task.poll() == CommandResult(0, "")
+    assert task.value == "late"

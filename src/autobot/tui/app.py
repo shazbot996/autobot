@@ -1,5 +1,6 @@
-"""The terminal user interface's application loop, its views and its dialogs.
+"""The application loop of the interface, its views and its dialogs.
 
+The terminal user interface is the application (see the package docstring).
 `App` owns a stack of views (the main menu, then whichever screen is open) and
 draws one frame about ten times a second: title bar, the top view inside a
 double-line frame, a message line and a key bar. Input never blocks for longer
@@ -11,6 +12,20 @@ the answer, act.
 
 `App` talks to the world only through `Services`, so tests build one with
 fakes and drive the real application code through a scripted fake screen.
+
+`T` switches to the next colour theme from anywhere, except while a text field
+has the keyboard; the choice is written to `[tui] theme`.
+
+Three environment variables, read only by `default_services` (the entry point
+`python -m autobot.tui`), point the interface at other directories, for trying
+it out without touching the real ones: `AUTOBOT_VOICE_DIR` replaces
+`data/voice/`, `AUTOBOT_FIXTURE_DIR` replaces `tests/fixtures/audio/`, and
+`AUTOBOT_MODELS_ROOT` replaces the repository root as the directory the model
+files are looked for under (`models/wakeword/candidate.onnx`, the phrase's
+relative `model` path and its `.prev`), so an install or a revert can be tried
+on a copy. They are not configuration: nothing writes them and nothing else
+reads them. The listener is not told about them: it loads its model from the
+repository, as always.
 """
 
 from __future__ import annotations
@@ -19,31 +34,58 @@ import curses
 import curses.ascii
 import locale
 import os
+import signal
 import socket
 import sys
+import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from autobot import __version__
 from autobot.config import Config, ConfigError, config_path, repo_root
 from autobot.tui.audio import FIXTURE_DIR, AudioBackend, SoundDeviceBackend
 from autobot.tui.config_edit import Change, ConfigEditError, ConfigStore
 from autobot.tui.menu import Menu, MenuItem
+from autobot.tui.monitor import SOCKET_PATH, EventSource, EventStream
 from autobot.tui.pipewire import PipeWire
 from autobot.tui.runner import (
+    LISTENER_CONTROL_MODULE,
+    LISTENER_STATUS_TIMEOUT,
     TRAIN_TARGET,
     BackgroundJob,
     CommandResult,
+    FunctionTask,
     Runner,
     SubprocessRunner,
     Task,
+    listener_status_argv,
     module_available,
+    spawn_function,
     train_argv,
 )
+from autobot.tui.state import (
+    BADGE_ROLES,
+    State,
+    candidate_exists,
+    listener_state,
+    parse_listener_status,
+)
+from autobot.tui.themes import PAIRS_NEEDED, PALETTES, next_theme
 from autobot.tui.ui import Canvas, Glyphs, Rect, Theme, fit, wrap
+from autobot.wakeword.data import PhraseTable
+from autobot.wakeword.dataset import VOICE_DIR, VoiceDataset
+from autobot.wakeword.script import Prompt, build_script
+
+if TYPE_CHECKING:
+    from autobot.wakeword.evaluate import KindScores, RealScores
+
+# Set these to try the interface against other directories (module docstring).
+VOICE_DIR_ENV_VAR = "AUTOBOT_VOICE_DIR"
+FIXTURE_DIR_ENV_VAR = "AUTOBOT_FIXTURE_DIR"
+MODELS_ROOT_ENV_VAR = "AUTOBOT_MODELS_ROOT"
 
 MIN_HEIGHT = 22
 MIN_WIDTH = 72
@@ -55,20 +97,50 @@ KEYS_ENTER = (curses.KEY_ENTER, 10, 13)
 KEYS_BACKSPACE = (curses.KEY_BACKSPACE, 127, 8)
 KEY_QUIT = curses.KEY_F10
 KEY_HELP = curses.KEY_F1
+KEYS_THEME = (ord("t"), ord("T"))
+
+# How often the main menu asks whether the listener runs, in seconds.
+LISTENER_POLL_SECONDS = 10.0
 
 SPINNER = "|/-\\"
 
-HELP_LINES = (
+# F1 shows the open screen's own keys (`View.help_lines`), then these: the
+# menu keys on a screen that is a menu, and the keys that work everywhere.
+MENU_HELP_LINES = (
     "Up, Down       move the selection (also k and j)",
     "Enter          choose the selected entry",
-    "1 to 9         choose an entry by its number",
+    "1 to 9, 0      choose an entry by its number (0 is the tenth)",
+)
+HELP_LINES = (
     "Esc            go back one screen, or cancel a dialog",
     "F10            quit (also q on the main menu)",
+    "T              the next colour theme: light, dark, sun",
     "F1             this help",
     "",
     "Every change is written to the config file at once.",
-    "The config file is the only place configuration lives.",
 )
+
+
+def score_real(model: Path, dataset: VoiceDataset, phrase: str) -> RealScores:
+    """Score a model on the dataset's held-out recordings: the real `Services.score_real`.
+
+    The evaluation is imported when it is first asked for, not when the
+    interface starts: it loads the ONNX runtime.
+    """
+    from autobot.wakeword.evaluate import score_real as score
+
+    return score(model, dataset, phrase)
+
+
+def score_kind(kind: str, config: Config, dataset: VoiceDataset) -> KindScores:
+    """Score a detector kind on the held-out recordings: the real `Services.score_kind`.
+
+    Imported when first asked for, like `score_real`: it builds the listener's
+    frame path with that kind's engine.
+    """
+    from autobot.wakeword.evaluate import score_kind as score
+
+    return score(kind, config, dataset)
 
 
 @dataclass
@@ -83,13 +155,44 @@ class Services:
     train_argv: list[str]
     hostname: str
     repo: Path
+    # The committed fixtures: written only by the deliberate export of a clip.
     fixture_dir: Path
     module_available: Callable[[str], bool] = module_available
+    # The voice dataset every recording goes into: `repo / VOICE_DIR` unless given.
+    dataset: VoiceDataset = field(default=None)  # type: ignore[assignment]
+    # The recording session's script for a phrase; tests give a short one.
+    build_script: Callable[[str, PhraseTable], list[Prompt]] = build_script
+    # Seconds that only ever go forward: paces the listener status poll.
+    clock: Callable[[], float] = time.monotonic
+    # The listener's event stream, read by the live monitor:
+    # `repo / run/listener.sock` unless given. Tests give a fake fed from a list.
+    events: EventSource = field(default=None)  # type: ignore[assignment]
+    # Scores a model file on the dataset's held-out recordings for a phrase
+    # (the Candidate screen); tests give one that needs no model.
+    score_real: Callable[[Path, VoiceDataset, str], RealScores] = score_real
+    # Scores a detector kind on the same held-out recordings, for the first
+    # wake phrase (the Candidate screen's baseline column); tests give a fake.
+    score_kind: Callable[[str, Config, VoiceDataset], KindScores] = score_kind
+    # Starts a slow function without blocking the interface; tests run it inline.
+    spawn: Callable[[Callable[[], object]], FunctionTask] = spawn_function
+    # The directory the model files are looked for under: `repo` unless given.
+    models_root: Path = field(default=None)  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.dataset is None:
+            self.dataset = VoiceDataset(self.repo / VOICE_DIR)
+        if self.events is None:
+            self.events = EventStream(self.repo / SOCKET_PATH)
+        if self.models_root is None:
+            self.models_root = self.repo
 
 
 def default_services() -> Services:
     repo = repo_root()
     run_dir = repo / "run"
+    voice_dir = os.environ.get(VOICE_DIR_ENV_VAR)
+    fixture_dir = os.environ.get(FIXTURE_DIR_ENV_VAR)
+    models_root = os.environ.get(MODELS_ROOT_ENV_VAR)
     return Services(
         store=ConfigStore(config_path()),
         audio=SoundDeviceBackend(),
@@ -101,7 +204,13 @@ def default_services() -> Services:
         train_argv=train_argv(),
         hostname=socket.gethostname(),
         repo=repo,
-        fixture_dir=repo / FIXTURE_DIR,
+        fixture_dir=(
+            Path(fixture_dir).expanduser() if fixture_dir else repo / FIXTURE_DIR
+        ),
+        dataset=VoiceDataset(
+            Path(voice_dir).expanduser() if voice_dir else repo / VOICE_DIR
+        ),
+        models_root=Path(models_root).expanduser() if models_root else repo,
     )
 
 
@@ -109,6 +218,13 @@ class View:
     """One screen. Subclasses draw inside the frame and handle keys."""
 
     title = ""
+    # True while a text field of the view has the keyboard: `T` types then.
+    typing = False
+    # The screen's own keys, for F1: `"keys           what they do"` lines, the
+    # description from column 15, at most 60 characters each.
+    help_lines: Sequence[str] = ()
+    # Whether the menu keys (Up, Down, Enter, the numbers) work on the screen.
+    menu_keys = False
 
     def __init__(self, app: App) -> None:
         self.app = app
@@ -140,6 +256,13 @@ class View:
 class MenuView(View):
     """A view made of facts at the top, a menu, and a free panel below."""
 
+    # The title set into the frame around the facts.
+    facts_title = ""
+    # The rows `draw_panel` needs. The facts lose their frame, which costs a
+    # row, before the panel loses one in a terminal of the minimum size.
+    panel_rows = 0
+    menu_keys = True
+
     def __init__(self, app: App) -> None:
         super().__init__(app)
         # Filled by `refresh_menu` on every draw and key: labels follow state.
@@ -158,38 +281,69 @@ class MenuView(View):
     def refresh_menu(self) -> None:
         self.menu.replace(self.items())
 
-    def draw(self, canvas: Canvas, rect: Rect) -> None:
+    def draw_facts(self, canvas: Canvas, rect: Rect, rows_after: int) -> int:
+        """Draw the facts at the top of `rect`; return the rows they took.
+
+        They sit in a framed panel when the terminal has the row to spare for
+        it (`rows_after` is what the rest of the view needs), and above a rule
+        when it has not.
+        """
         theme = canvas.theme
-        self.refresh_menu()
-        row = 0
         facts = self.facts()
-        label_width = max((len(label) for label, _, _ in facts), default=0)
-        for label, value, role in facts:
-            canvas.put_in(rect, row, 1, label.ljust(label_width), theme.normal)
+        if not facts:
+            return 0
+        label_width = max(len(label) for label, _, _ in facts)
+        framed = rect.height >= len(facts) + 2 + rows_after
+        if framed:
+            inside = canvas.panel(
+                Rect(rect.y, rect.x, len(facts) + 2, rect.width),
+                self.facts_title,
+                title_attr=theme.heading,
+            )
+        else:
+            inside = Rect(rect.y, rect.x + 1, len(facts), rect.width - 2)
+        for row, (label, value, role) in enumerate(facts):
+            canvas.put_in(inside, row, 0, label.ljust(label_width), theme.normal)
             canvas.put_in(
-                rect,
+                inside,
                 row,
-                label_width + 3,
-                fit(value, rect.width - label_width - 4),
+                label_width + 2,
+                fit(value, inside.width - label_width - 2),
                 getattr(theme, role),
             )
-            row += 1
-        if facts:
-            canvas.rule(rect, row, theme.frame)
-            row += 1
+        if framed:
+            return len(facts) + 2
+        canvas.rule(rect, len(facts), theme.frame)
+        return len(facts) + 1
+
+    def draw_menu(self, canvas: Canvas, rect: Rect) -> int:
+        """Draw the menu's entries from the top of `rect`; return the rows taken."""
+        theme = canvas.theme
         for index, item in enumerate(self.menu.items):
             selected = index == self.menu.selected and item.enabled
             pointer = canvas.glyphs.pointer if selected else " "
-            text = f" {pointer} {index + 1}  {item.label} "
+            # The tenth entry answers to 0; later ones have no number.
+            number = str((index + 1) % 10) if index < 10 else " "
+            text = f" {pointer} {number}  {item.label} "
             if selected:
                 attr = theme.selected
                 text = text.ljust(min(rect.width - 2, 60))
             else:
                 attr = theme.normal if item.enabled else theme.dim
-            canvas.put_in(rect, row, 1, fit(text, rect.width - 2), attr)
-            row += 1
+            canvas.put_in(rect, index, 1, fit(text, rect.width - 2), attr)
+        return len(self.menu.items)
+
+    def draw(self, canvas: Canvas, rect: Rect) -> None:
+        self.refresh_menu()
+        below = len(self.menu.items)
+        if self.panel_rows:
+            below += 1 + self.panel_rows
+        row = self.draw_facts(canvas, rect, below)
+        row += self.draw_menu(
+            canvas, Rect(rect.y + row, rect.x, rect.height - row, rect.width)
+        )
         if row < rect.height - 1:
-            canvas.rule(rect, row, theme.frame)
+            canvas.rule(rect, row, canvas.theme.frame)
             self.draw_panel(
                 canvas,
                 Rect(rect.y + row + 1, rect.x, rect.height - row - 1, rect.width),
@@ -209,6 +363,8 @@ class MenuView(View):
             self.menu.activate()
         elif ord("1") <= key <= ord("9"):
             self.menu.activate_number(key - ord("0"))
+        elif key == ord("0"):
+            self.menu.activate_number(10)
         else:
             return False
         return True
@@ -248,25 +404,47 @@ class TextView(View):
 
 class App:
     def __init__(
-        self, screen: Any, theme: Theme, glyphs: Glyphs, services: Services
+        self,
+        screen: Any,
+        theme: Theme,
+        glyphs: Glyphs,
+        services: Services,
+        themes: Callable[[str], Theme] | None = None,
     ) -> None:
+        """`themes` builds the colour theme of a name; None on a terminal without colours."""
         self.screen = screen
         self.canvas = Canvas(screen, theme, glyphs)
         self.services = services
         self.config: Config = services.store.load()
+        self.themes = themes
         self.views: list[View] = []
         self.status = ""
         self.status_role = "normal"
+        # True while a recording session is open: the state reads *recording*.
+        self.session_open = False
+        # What `control status` last said; None before the first answer.
+        self.listener_running: bool | None = None
+        # Counts every view opened or closed, so a view can tell it was covered.
+        self.changes = 0
+        self._status_task: Task | None = None
+        self._status_at: float | None = None
+        self._typing = 0
         self._frames = 0
 
     # --- state --------------------------------------------------------------
 
     def push(self, view: View) -> None:
+        # A screen opens on the config file as it is now: it may have been
+        # edited by hand while the interface was open.
+        if self.views:
+            self.reload()
+        self.changes += 1
         self.views.append(view)
         view.enter()
 
     def pop(self) -> None:
         if self.views:
+            self.changes += 1
             self.views.pop().leave()
 
     def say(self, text: str, role: str = "normal") -> None:
@@ -292,7 +470,88 @@ class App:
         try:
             self.config = self.services.store.load()
         except ConfigError as error:
-            self.error(str(error))
+            # The file's name, not its path: the line has to say what is wrong.
+            path = self.services.store.path
+            self.error(f"Not read again: {str(error).replace(str(path), path.name)}")
+
+    def require_nuc(self, what: str) -> bool:
+        """Whether this machine is the configured NUC; says the one line when not.
+
+        The recording session, the live monitor and the install step call this
+        before doing anything (TS-11); the wording is the listener's.
+        """
+        hostname = self.services.hostname
+        nuc = self.config.host.nuc_hostname
+        if nuc and nuc.lower() == hostname.lower():
+            return True
+        self.error(f"{what} runs on the NUC only; this host is {hostname}")
+        return False
+
+    # --- the listener's state -------------------------------------------------
+
+    def state(self) -> State:
+        """Where the wake-word listener stands (`autobot.tui.state`)."""
+        root = self.services.models_root
+        return listener_state(
+            self.config,
+            root,
+            candidate_exists(root),
+            self.session_open,
+            # Not known yet is not "down".
+            self.listener_running is not False,
+        )
+
+    def poll_listener(self, *, now: bool = False) -> None:
+        """Ask whether the listener runs, without blocking; the main menu calls this.
+
+        Every frame it collects the answer of the question in flight, and it
+        asks again when `now` is set or `LISTENER_POLL_SECONDS` have passed.
+        """
+        services = self.services
+        if self._status_task is not None:
+            result = self._status_task.poll()
+            if result is None:
+                return
+            self._status_task = None
+            self.listener_running = (
+                parse_listener_status(result.output) if result.ok else None
+            )
+        moment = services.clock()
+        due = (
+            self._status_at is None or moment - self._status_at >= LISTENER_POLL_SECONDS
+        )
+        if not (now or due):
+            return
+        self._status_at = moment
+        if not services.module_available(LISTENER_CONTROL_MODULE):
+            self.listener_running = None
+            return
+        self._status_task = services.runner.start(
+            listener_status_argv(), cwd=services.repo, timeout=LISTENER_STATUS_TIMEOUT
+        )
+
+    # --- themes ---------------------------------------------------------------
+
+    def apply_theme(self, theme: Theme) -> None:
+        self.canvas.theme = theme
+        # The page takes the theme's colours. Not its bold: curses adds the
+        # background's attributes to every character drawn on it.
+        self.screen.bkgd(" ", theme.normal & ~curses.A_BOLD)
+
+    def cycle_theme(self) -> None:
+        """Switch to the next colour theme at once and write it to the config file."""
+        if self.themes is None:
+            self.say("this terminal has no colours")
+            return
+        name = next_theme(self.config.tui.theme)
+        if not self.save(Change("tui", "theme", name)):
+            return
+        self.apply_theme(self.themes(name))
+        self.say(f"Theme: {name}. T switches to the next; saved as [tui] theme.", "ok")
+
+    def typing(self) -> bool:
+        """Whether a text field has the keyboard, so that `T` is a letter."""
+        return self._typing > 0 or bool(self.views and self.views[-1].typing)
 
     # --- the loop -----------------------------------------------------------
 
@@ -316,7 +575,7 @@ class App:
         if key == KEY_QUIT:
             self.quit()
         elif key == KEY_HELP:
-            self.message("Help", HELP_LINES)
+            self.message("Help", self.help_lines())
         elif view.key(key):
             pass
         elif key == KEY_ESC or key == ord("q"):
@@ -324,6 +583,14 @@ class App:
                 self.pop()
             else:
                 self.quit()
+
+    def help_lines(self) -> list[str]:
+        """What F1 shows: the top screen's own keys, then the general ones."""
+        view = self.views[-1]
+        lines = list(view.help_lines)
+        if view.menu_keys:
+            lines += MENU_HELP_LINES
+        return [*lines, *HELP_LINES]
 
     def quit(self) -> None:
         """Close every view, after asking what to do with a running training."""
@@ -362,6 +629,9 @@ class App:
             return -1
         if key != -1 and self.too_small() and key != KEY_QUIT:
             return -1
+        if key in KEYS_THEME and not self.typing():
+            self.cycle_theme()
+            return -1
         return key
 
     def draw(self, overlay: Callable[[Canvas], None] | None = None) -> None:
@@ -380,11 +650,19 @@ class App:
             canvas.refresh()
             return
 
-        title = f" autobot Setup Utility {__version__}"
+        title = f" autobot {__version__}"
         right = f"{self.services.hostname} "
         canvas.put(0, 0, " " * width, theme.title)
         canvas.put(0, 0, title, theme.title)
         canvas.put(0, width - len(right), right, theme.title)
+        # The listener's state is on every screen, not only the main menu.
+        state = self.state()
+        canvas.put(
+            0,
+            len(title) + 2,
+            f" {state.value.upper()} ",
+            getattr(theme, BADGE_ROLES[state]),
+        )
 
         view = self.views[-1] if self.views else None
         frame = Rect(1, 0, height - 3, width)
@@ -400,7 +678,16 @@ class App:
 
         canvas.put(height - 1, 0, " " * width, theme.key_label)
         column = 0
-        for name, label in view.key_bar() if view else ():
+        # `T Theme` works everywhere, so it is drawn here, at the right, when
+        # the view's own keys leave room for it.
+        keys = list(view.key_bar()) if view else []
+        used = sum(len(name) + len(label) + 4 for name, label in keys)
+        theme_key = ("T", "Theme")
+        if used + len(theme_key[0]) + len(theme_key[1]) + 3 <= width:
+            keys.append(theme_key)
+        for name, label in keys:
+            if (name, label) == theme_key:
+                column = max(column, width - len(name) - len(label) - 3)
             canvas.put(height - 1, column, f" {name} ", theme.key)
             column += len(name) + 2
             canvas.put(height - 1, column, f"{label} ", theme.key_label)
@@ -575,33 +862,48 @@ class App:
                 inside, 4, 0, fit("Enter: OK   Esc: Cancel", inside.width), theme.dialog
             )
 
-        while True:
-            key = self.frame(overlay)
-            if key in (KEY_ESC, KEY_QUIT):
-                return None
-            if key in KEYS_ENTER:
-                complaint = (validate(text) if validate else None) or ""
-                if not complaint:
-                    return text
-            elif key in KEYS_BACKSPACE:
-                text = text[:-1]
-                complaint = ""
-            elif key == curses.ascii.NAK:  # Ctrl-U
-                text = ""
-                complaint = ""
-            elif 32 <= key < 127:
-                text += chr(key)
-                complaint = ""
+        # The text field has the keyboard: `T` types a letter here.
+        self._typing += 1
+        try:
+            while True:
+                key = self.frame(overlay)
+                if key in (KEY_ESC, KEY_QUIT):
+                    return None
+                if key in KEYS_ENTER:
+                    complaint = (validate(text) if validate else None) or ""
+                    if not complaint:
+                        return text
+                elif key in KEYS_BACKSPACE:
+                    text = text[:-1]
+                    complaint = ""
+                elif key == curses.ascii.NAK:  # Ctrl-U
+                    text = ""
+                    complaint = ""
+                elif 32 <= key < 127:
+                    text += chr(key)
+                    complaint = ""
+        finally:
+            self._typing -= 1
 
-    def wait(self, title: str, task: Task) -> CommandResult:
-        """Show a busy box until `task` ends. Esc asks it to stop."""
+    def wait(
+        self, title: str, task: Task, note: Callable[[], str] | None = None
+    ) -> CommandResult:
+        """Show a busy box until `task` ends. Esc asks it to stop.
+
+        `note` gives a line to show under the spinner, asked every frame: how
+        long a slow task has been running, for one.
+        """
         cancelling = False
 
         def overlay(canvas: Canvas) -> None:
-            inside = self._dialog(canvas, title, 3, 44)
+            inside = self._dialog(canvas, title, 3, max(44, len(title) + 4))
             spinner = SPINNER[self._frames % len(SPINNER)]
             text = "Stopping..." if cancelling else f"Working... {spinner}"
             canvas.put_in(inside, 0, 0, text, canvas.theme.dialog)
+            if note is not None:
+                canvas.put_in(
+                    inside, 1, 0, fit(note(), inside.width), canvas.theme.dialog
+                )
             canvas.put_in(inside, 2, 0, "Esc: Cancel", canvas.theme.dialog)
 
         while True:
@@ -666,30 +968,41 @@ def pick_glyphs() -> Glyphs:
     )
 
 
-def pick_theme() -> Theme:
-    """The colour theme when the terminal has colours, else the mono one."""
+def colours_available() -> bool:
+    """Whether the terminal can draw the colour themes. Starts curses' colours."""
     if os.environ.get("NO_COLOR"):
-        return Theme.mono()
+        return False
     try:
         if curses.has_colors():
             curses.start_color()
-            if curses.COLORS >= 8 and curses.COLOR_PAIRS > 10:
-                return Theme.colour()
+            return curses.COLORS >= 8 and curses.COLOR_PAIRS > PAIRS_NEEDED
     except curses.error:
         pass
-    return Theme.mono()
+    return False
+
+
+def colour_theme(name: str) -> Theme:
+    """The colour theme of a name; an unknown name gives the first theme."""
+    palette = PALETTES.get(name) or next(iter(PALETTES.values()))
+    return Theme.from_palette(palette)
 
 
 def _curses_main(screen: Any, services: Services) -> int:
-    theme = pick_theme()
+    themes = colour_theme if colours_available() else None
     try:
         curses.curs_set(0)
     except curses.error:
         pass
     screen.keypad(True)
     screen.timeout(FRAME_MS)
-    screen.bkgd(" ", theme.normal)
-    return App(screen, theme, pick_glyphs(), services).run()
+    app = App(screen, Theme.mono(), pick_glyphs(), services, themes)
+    # Open in the theme the config file names (TS-13); mono without colours.
+    app.apply_theme(themes(app.config.tui.theme) if themes else Theme.mono())
+    return app.run()
+
+
+def _leave_on_signal(signum: int, frame: object) -> None:
+    raise SystemExit(128 + signum)
 
 
 def main() -> int:
@@ -709,6 +1022,11 @@ def main() -> int:
     # Without this curses waits a full second after Esc to see whether it
     # starts an escape sequence.
     os.environ.setdefault("ESCDELAY", "25")
+    # A closed terminal or a `kill` leaves as F10 does: every view is closed
+    # on the way out, so a take being recorded is stored and the input stream
+    # released.
+    for signum in (signal.SIGHUP, signal.SIGTERM):
+        signal.signal(signum, _leave_on_signal)
     try:
         with quiet_stderr():
             return curses.wrapper(_curses_main, services)

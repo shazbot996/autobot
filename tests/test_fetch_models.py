@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
+import tarfile
 import urllib.error
 from email.message import Message
 from pathlib import Path
@@ -12,6 +14,7 @@ import pytest
 
 from autobot import fetch_models
 from autobot.fetch_models import Asset, FetchError
+from autobot.listener.engines.sherpa_kws import SHERPA_KWS_FILES, SHERPA_KWS_MODEL
 
 
 class FakeResponse(io.BytesIO):
@@ -179,3 +182,102 @@ def test_an_asset_is_a_url_and_a_path_under_models() -> None:
     asset = Asset("https://example.invalid/a", Path("silero") / "a.onnx")
     assert asset.limit is None
     assert not asset.path.is_absolute()
+
+
+# --- the sherpa_kws model: one archive, checked, then five files of it --------
+
+
+def sherpa_archive(path: Path, names: tuple[str, ...]) -> str:
+    """Write a release-shaped archive holding `names`; return its sha256."""
+    folder = SHERPA_KWS_MODEL
+    with tarfile.open(path, "w:bz2") as bundle:
+        for name in (*names, "README.md", "test_wavs/0.wav"):
+            body = name.encode()
+            member = tarfile.TarInfo(f"{folder}/{name}")
+            member.size = len(body)
+            bundle.addfile(member, io.BytesIO(body))
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def serve_archive(
+    monkeypatch: pytest.MonkeyPatch, source: Path, sha256: str
+) -> list[str]:
+    """Make `fetch` copy `source` instead of downloading; return the URLs asked for."""
+    asked: list[str] = []
+
+    def fetch(url: str, destination: Path, limit: int | None = None) -> bool:
+        asked.append(url)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(source.read_bytes())
+        return True
+
+    monkeypatch.setattr(fetch_models, "fetch", fetch)
+    monkeypatch.setattr(fetch_models, "SHERPA_KWS_SHA256", sha256)
+    return asked
+
+
+def test_the_sherpa_kws_model_is_unpacked_to_the_files_the_engine_loads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "release.tar.bz2"
+    sha256 = sherpa_archive(source, SHERPA_KWS_FILES)
+    asked = serve_archive(monkeypatch, source, sha256)
+    models = tmp_path / "models"
+    assert fetch_models.fetch_sherpa_kws(models)
+    assert asked == [fetch_models.SHERPA_KWS_URL]
+    assert asked[0].startswith("https://github.com/k2-fsa/sherpa-onnx/releases/")
+    # Only the engine's files are kept: no archive, no README, no test clips.
+    kept = {path.name for path in (models / "sherpa-kws").iterdir()}
+    assert kept == set(SHERPA_KWS_FILES)
+    assert (models / "sherpa-kws" / "tokens.txt").read_bytes() == b"tokens.txt"
+    # Already there: nothing is asked for again.
+    assert not fetch_models.fetch_sherpa_kws(models)
+    assert len(asked) == 1
+
+
+def test_a_sherpa_kws_archive_that_fails_its_checksum_is_deleted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "release.tar.bz2"
+    sherpa_archive(source, SHERPA_KWS_FILES)
+    serve_archive(monkeypatch, source, "0" * 64)
+    models = tmp_path / "models"
+    with pytest.raises(FetchError, match="does not match its published checksum"):
+        fetch_models.fetch_sherpa_kws(models)
+    assert list((models / "sherpa-kws").iterdir()) == []
+
+
+def test_a_sherpa_kws_archive_without_a_model_file_is_one_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "release.tar.bz2"
+    sha256 = sherpa_archive(source, SHERPA_KWS_FILES[:-1])
+    serve_archive(monkeypatch, source, sha256)
+    with pytest.raises(FetchError, match="does not hold joiner-"):
+        fetch_models.fetch_sherpa_kws(tmp_path / "models")
+
+
+def test_the_command_names_the_listeners_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Nothing is downloaded: every file is "already there" but the Joe voice.
+    wanted: list[Path] = []
+
+    def fake_fetch(url: str, destination: Path, limit: int | None = None) -> bool:
+        wanted.append(destination)
+        return destination.name == "en_US-joe-medium.onnx"
+
+    monkeypatch.setattr(fetch_models, "fetch", fake_fetch)
+    monkeypatch.setattr(fetch_models, "fetch_sherpa_kws", lambda models: False)
+    monkeypatch.setattr(fetch_models, "ack_voice", lambda: "en_US-joe-medium")
+    monkeypatch.setattr(fetch_models, "resolve_repo_path", lambda path: tmp_path)
+    assert fetch_models.main([]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert "  fetched  models/piper/en_US-joe-medium.onnx" in lines
+    assert "  have     models/piper/en_US-joe-medium.onnx.json" in lines
+    assert "  have     models/silero/silero_vad.onnx" in lines
+    assert "  have     models/sherpa-kws/ (5 files: the sherpa_kws baseline)" in lines
+    assert lines[-1].endswith("(1 fetched now, 8 already there)")
+    assert len(lines) == len(wanted) + 2

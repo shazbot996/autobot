@@ -13,6 +13,9 @@ microphone, a speaker or the network.
 | `unrelated_speech.wav` | "The weather tomorrow looks fine for a walk in the park." | none |
 | `near_miss_auto.wav` | "Auto." | none |
 
+Every detector kind is held to this table: the `text_match`, `openwakeword`
+and `sherpa_kws` tests each run all six clips through the service's frame path.
+
 **These are placeholders, not recordings.** Nobody was available to speak when
 they were made, so the speech clips are synthesised locally with piper-tts
 (voices `ryan`, `amy`, `hfc_male`, `kristin` and `joe`, none of them the
@@ -21,8 +24,12 @@ before and after and low added noise. `synthesise.py` in this directory made
 them; piper's synthesis is not deterministic, so running it again gives
 slightly different clips, and the tests must be re-run after it.
 
-Replace them with real recordings made on the NUC from the Audio screen of the
-terminal user interface (`make deploy`), which saves clips into this
-directory. Keep the file names, and keep about half a second of quiet at the
-start and a full second at the end of each clip, so the tests keep passing
-unchanged.
+Replace them with real recordings, one clip at a time, from the Dataset screen
+of the terminal user interface (`make deploy`). Recordings are made into the
+voice dataset (`data/voice/`), which is never committed; a fixture is a
+deliberate export of one of them. On the Dataset screen choose a clip, press
+`E`, pick one of the file names above and confirm. The export keeps the file
+name and gives the speech about half a second of quiet before it and a full
+second after it, adding silence where the recording has less, so the tests
+keep passing unchanged. Nothing else writes into this directory: a fixture is
+committed, and so public, and what goes into it is chosen clip by clip.

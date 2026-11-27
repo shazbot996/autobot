@@ -9,7 +9,9 @@ from typing import Any
 import numpy as np
 import pytest
 
+from autobot.config import resolve_repo_path
 from autobot.listener.models import enforce_offline
+from autobot.tui.audio import Clip
 from autobot.wakeword import train
 from autobot.wakeword.data import (
     HELDOUT_VOICES,
@@ -17,6 +19,14 @@ from autobot.wakeword.data import (
     TRAIN_VOICES,
     PhraseTable,
     phrase_table,
+)
+from autobot.wakeword.dataset import (
+    LABEL_AMBIENT,
+    LABEL_NEGATIVE,
+    LABEL_POSITIVE,
+    ClipRecord,
+    VoiceDataset,
+    split,
 )
 from autobot.wakeword.features import embedding_count
 from autobot.wakeword.train import (
@@ -161,30 +171,43 @@ def test_each_network_size_and_schedule_has_its_own_checkpoint(tmp_path: Path) -
 def test_each_loss_has_its_own_checkpoint(tmp_path: Path) -> None:
     def run(**settings: Any) -> train.Run:
         return train.Run(
-            phrase="autobot",
-            output=tmp_path / "autobot.onnx",
-            models=tmp_path,
-            work=tmp_path / "work",
-            scale=1,
-            steps=1000,
-            hidden=128,
-            threads=1,
-            **settings,
+            **{
+                "phrase": "autobot",
+                "output": tmp_path / "autobot.onnx",
+                "models": tmp_path,
+                "work": tmp_path / "work",
+                "scale": 1,
+                "steps": 1000,
+                "hidden": 128,
+                "threads": 1,
+                **settings,
+            }
         )
 
     # The first model's settings keep the first model's checkpoint name.
-    assert run().checkpoint.name == "ckpt-128-1000.pt"
-    assert run().variant == ""
+    first = run(exclude_near=False)
+    assert first.checkpoint.name == "ckpt-128-1000.pt"
+    assert first.variant == ""
+    # The studio's training leaves the near homophones out unless told not to.
+    assert run().exclude_near
+    assert run().checkpoint.name == "ckpt-128-1000-x1-k1-n1.pt"
     paths = {
+        first.checkpoint,
         run().checkpoint,
-        run(exclude_near=True).checkpoint,
-        run(exclude_near=True, hard_topk=0.0).checkpoint,
-        run(exclude_near=True, negative_weight=0.5).checkpoint,
         run(hard_topk=0.0).checkpoint,
+        run(negative_weight=0.5).checkpoint,
+        run(exclude_near=False, hard_topk=0.0).checkpoint,
+        # A run on real recordings never shares a synthetic-only checkpoint.
+        run(real_manifest="abc").checkpoint,
+        run(exclude_near=False, real_manifest="abc").checkpoint,
     }
-    assert len(paths) == 5
+    assert len(paths) == 7
+    assert run(real_manifest="abc").checkpoint.name == "ckpt-128-1000-x1-k1-n1-real.pt"
+    assert run(exclude_near=False, real_manifest="abc").checkpoint.name == (
+        "ckpt-128-1000-real.pt"
+    )
     # Where the result is written does not make it a different training.
-    assert run(candidate=True).checkpoint == run().checkpoint
+    assert run(output=tmp_path / "other.onnx").checkpoint == run().checkpoint
 
 
 def test_a_checkpoint_does_not_resume_a_run_with_another_loss() -> None:
@@ -206,6 +229,19 @@ def test_a_checkpoint_does_not_resume_a_run_with_another_loss() -> None:
     assert train.checkpoint_matches(
         new, {**wanted, "excluded": ["auto boot"], "hard_topk": 0.0}
     )
+
+
+def test_a_changed_dataset_starts_a_fresh_run() -> None:
+    wanted = {"phrase": "autobot", "steps": 1000, "real_manifest": "aaa"}
+    assert train.checkpoint_matches({**wanted, "step": 400}, wanted)
+    # Another clip in the manifest is another manifest hash.
+    assert not train.checkpoint_matches(
+        {**wanted, "step": 400}, {**wanted, "real_manifest": "bbb"}
+    )
+    # A checkpoint from before there were recordings was trained on none.
+    old = {"phrase": "autobot", "steps": 1000, "step": 400}
+    assert not train.checkpoint_matches(old, wanted)
+    assert train.checkpoint_matches(old, {**wanted, "real_manifest": ""})
 
 
 # --- what the clips say ------------------------------------------------------
@@ -506,31 +542,28 @@ def test_slug() -> None:
     assert train.slug("?!") == "phrase"
 
 
-def test_installing_keeps_the_model_it_replaces(tmp_path: Path) -> None:
-    output = tmp_path / "autobot.onnx"
-    first, second = tmp_path / "a.tmp", tmp_path / "b.tmp"
-    first.write_bytes(b"model one")
-    train.install(first, {"recommended_threshold": 0.9}, output)
-    assert output.read_bytes() == b"model one"
-    assert not first.exists()
-    assert not train.previous_path(output).exists()
-    second.write_bytes(b"model two")
-    train.install(second, {"recommended_threshold": 0.7}, output)
-    assert output.read_bytes() == b"model two"
-    assert (tmp_path / "autobot.prev.onnx").read_bytes() == b"model one"
-    metrics = json.loads((tmp_path / "autobot.json").read_text())
-    previous = json.loads((tmp_path / "autobot.prev.json").read_text())
-    assert (metrics["recommended_threshold"], previous["recommended_threshold"]) == (
-        0.7,
-        0.9,
-    )
-    # Nothing temporary is left beside the model.
+def test_a_run_writes_a_candidate_and_touches_nothing_else(tmp_path: Path) -> None:
+    installed = tmp_path / "autobot.onnx"
+    installed.write_bytes(b"the installed model")
+    (tmp_path / "autobot.json").write_text('{"recommended_threshold": 0.8}\n')
+    output = tmp_path / train.CANDIDATE_NAME
+    for content, threshold in ((b"candidate one", 0.9), (b"candidate two", 0.7)):
+        exported = tmp_path / "candidate.onnx.tmp"
+        exported.write_bytes(content)
+        train.write_candidate(exported, {"recommended_threshold": threshold}, output)
+        assert output.read_bytes() == content
+        metrics = json.loads((tmp_path / "candidate.json").read_text())
+        assert metrics["recommended_threshold"] == threshold
+    # One candidate at a time, no `.prev`, nothing temporary, and the
+    # installed model and its evaluation as they were.
     assert sorted(path.name for path in tmp_path.iterdir()) == [
         "autobot.json",
         "autobot.onnx",
-        "autobot.prev.json",
-        "autobot.prev.onnx",
+        "candidate.json",
+        "candidate.onnx",
     ]
+    assert installed.read_bytes() == b"the installed model"
+    assert not hasattr(train, "install")
 
 
 def test_a_missing_training_asset_is_one_line_naming_the_fetch(tmp_path: Path) -> None:
@@ -562,29 +595,47 @@ def test_the_command_line_reports_a_bad_scale_in_one_line(
     assert capsys.readouterr().err == "--scale must be above 0\n"
 
 
-def test_a_named_run_is_a_candidate_beside_the_installed_model(tmp_path: Path) -> None:
+def test_the_default_output_is_the_candidate(tmp_path: Path) -> None:
+    run = train.resolve_run(train.build_parser().parse_args(["--work", str(tmp_path)]))
+    assert run.output == resolve_repo_path("models/wakeword/candidate.onnx")
+    assert run.output.name == train.CANDIDATE_NAME
+    # The owner's recordings, unless another directory is named.
+    assert run.dataset == resolve_repo_path("data/voice")
+    elsewhere = train.resolve_run(
+        train.build_parser().parse_args(
+            ["--work", str(tmp_path), "--dataset", str(tmp_path / "voice")]
+        )
+    )
+    assert elsewhere.dataset == tmp_path / "voice"
+
+
+def test_a_named_run_is_an_experiment_beside_the_candidate(tmp_path: Path) -> None:
     arguments = ["--output", str(tmp_path / "autobot.onnx"), "--work", str(tmp_path)]
     plain = train.resolve_run(train.build_parser().parse_args(arguments))
     assert plain.output == tmp_path / "autobot.onnx"
-    assert not plain.candidate
-    # The first model's training, unless the options say otherwise.
+    # The best known recipe, unless the options say otherwise: the near
+    # homophones left out, both loss weights at 1.
     assert (plain.exclude_near, plain.hard_topk, plain.negative_weight) == (
-        False,
+        True,
         1.0,
         1.0,
     )
-    options = ["--name", "exp_b", "--exclude-near-homophones"]
+    options = ["--name", "exp_b", "--no-exclude-near-homophones"]
     options += ["--hard-topk-weight", "0", "--negative-weight", "0.5"]
     named = train.resolve_run(train.build_parser().parse_args(arguments + options))
     assert named.output == tmp_path / "candidates" / "exp_b.onnx"
-    assert named.candidate
     assert (named.exclude_near, named.hard_topk, named.negative_weight) == (
-        True,
+        False,
         0.0,
         0.5,
     )
     assert named.checkpoint != plain.checkpoint
     assert named.checkpoint.parent == plain.checkpoint.parent
+    # The first model's training is still there to be asked for.
+    first = train.resolve_run(
+        train.build_parser().parse_args([*arguments, "--no-exclude-near-homophones"])
+    )
+    assert first.variant == ""
 
 
 @pytest.mark.parametrize(
@@ -612,3 +663,493 @@ def test_the_model_file_must_be_onnx(
 ) -> None:
     assert train.main(["--output", str(tmp_path / "model.bin")]) == 2
     assert "must end in .onnx" in capsys.readouterr().err
+
+
+# --- the real recordings -----------------------------------------------------
+
+RATE = 16000
+SPEAKER = "tester"
+
+
+def speech_like(seconds: float, lead: float = 0.5, tail: float = 0.7) -> train.Int16:
+    """Quiet, then a tone burst standing in for speech, then quiet."""
+    rng = np.random.default_rng(int(seconds * 1000))
+    burst = 4000 * np.sin(2 * np.pi * 300 * np.arange(int(seconds * RATE)) / RATE)
+    audio = rng.normal(0, 30, int((lead + seconds + tail) * RATE))
+    audio[int(lead * RATE) : int(lead * RATE) + len(burst)] += burst
+    return audio.astype(np.int16)
+
+
+def room(seconds: float, seed: int = 0) -> train.Int16:
+    return (
+        np.random.default_rng(seed).normal(0, 40, int(seconds * RATE)).astype(np.int16)
+    )
+
+
+def record_for(
+    label: str, prompt: str, prompt_id: str, number: int, speaker: str = SPEAKER
+) -> ClipRecord:
+    return ClipRecord(
+        file="",
+        phrase="autobot",
+        prompt=prompt,
+        prompt_id=prompt_id,
+        label=label,
+        source="session",
+        speaker=speaker,
+        device="test",
+        recorded_at=f"2026-11-26T18:{number // 60:02d}:{number % 60:02d}+00:00",
+    )
+
+
+def prompt_ids(side: str, count: int, prefix: str) -> list[str]:
+    """Prompt identifiers the dataset's split puts on one side, for `SPEAKER`."""
+    found: list[str] = []
+    number = 0
+    while len(found) < count:
+        identifier = f"{prefix}-{number:03d}"
+        if split(record_for(LABEL_POSITIVE, "", identifier, 0)) == side:
+            found.append(identifier)
+        number += 1
+    return found
+
+
+def small_dataset(root: Path) -> VoiceDataset:
+    """Six positives, six negatives and two ambient recordings, on known sides."""
+    dataset = VoiceDataset(root)
+    number = 0
+
+    def add(label: str, prompt: str, prompt_id: str, audio: train.Int16) -> None:
+        nonlocal number
+        number += 1
+        dataset.add(Clip(audio, RATE), record_for(label, prompt, prompt_id, number))
+
+    prompts = ("autobot", "hey autobot", "yo autobot", "autobot, what time is it")
+    for index, identifier in enumerate(prompt_ids("train", 4, "pos")):
+        add(LABEL_POSITIVE, prompts[index], identifier, speech_like(0.6 + 0.1 * index))
+    for identifier in prompt_ids("heldout", 2, "pos"):
+        add(LABEL_POSITIVE, "autobot", identifier, speech_like(0.65))
+    texts = ("auto boot", "autopilot", "how much does that cost", "auto bought")
+    for index, identifier in enumerate(prompt_ids("train", 4, "neg")):
+        add(LABEL_NEGATIVE, texts[index], identifier, speech_like(0.5 + 0.2 * index))
+    for identifier in prompt_ids("heldout", 2, "neg"):
+        add(LABEL_NEGATIVE, "robot", identifier, speech_like(0.55))
+    add(LABEL_AMBIENT, "say nothing", "ambient-01", room(60.0, 1))
+    add(LABEL_AMBIENT, "say nothing", "ambient-02", room(20.0, 2))
+    return dataset
+
+
+def test_the_real_split_lists_are_disjoint_and_cover_the_manifest(
+    tmp_path: Path,
+) -> None:
+    dataset = small_dataset(tmp_path)
+    real = train.load_real(dataset, "autobot")
+    table = phrase_table("autobot")
+    spoken = {r.file for r in dataset.records() if r.label != LABEL_AMBIENT}
+    ambient = {r.file for r in dataset.records() if r.label == LABEL_AMBIENT}
+
+    # Trained on the near homophones too: two lists, and nothing else.
+    section = train.real_section(real, table, exclude_near=False)
+    trained, held = set(section["trained"]), set(section["heldout"])
+    assert not trained & held
+    assert trained | held == spoken
+    assert section["excluded"] == []
+    assert (len(trained), len(held)) == (8, 4)
+    assert "note" not in section
+
+    # The default leaves the recordings of near homophones out of the
+    # training: they are named on their own, and are on neither list.
+    section = train.real_section(real, table, exclude_near=True)
+    trained, held = set(section["trained"]), set(section["heldout"])
+    excluded = set(section["excluded"])
+    assert len(excluded) == 2  # "auto boot" and "auto bought"
+    assert not trained & held and not trained & excluded and not held & excluded
+    assert trained | held | excluded == spoken
+    assert section["counts"] == {
+        "trained_positives": 4,
+        "trained_negatives": 2,
+        "excluded_negatives": 2,
+        "heldout_positives": 2,
+        "heldout_negatives": 2,
+        "ambient_clips": 2,
+        "ambient_trained_minutes": pytest.approx((48 + 16) / 60),
+        "ambient_heldout_minutes": pytest.approx((12 + 4) / 60),
+    }
+    # The ambient recordings are on no list of clips: they are split by time.
+    assert not ambient & (trained | held | excluded)
+    assert {entry["file"] for entry in section["ambient_trained"]} == ambient
+    assert section["manifest"] == real.manifest
+    # What the dataset itself says is held out.
+    size = dataset.heldout_size("autobot")
+    assert (size.positives, size.negatives) == (2, 2)
+    assert size.ambient_minutes == pytest.approx(real.heldout_ambient_minutes)
+
+
+def test_two_takes_of_one_prompt_land_on_the_same_list(tmp_path: Path) -> None:
+    dataset = VoiceDataset(tmp_path)
+    for number in range(40):
+        # Two takes of each of twenty prompts, recorded at different times.
+        record = record_for(
+            LABEL_POSITIVE, "autobot", f"bare-{number % 20:02d}", number
+        )
+        dataset.add(Clip(speech_like(0.6), RATE), record)
+    real = train.load_real(dataset, "autobot")
+    section = train.real_section(real, phrase_table("autobot"), exclude_near=True)
+    side = {file: "train" for file in section["trained"]}
+    side.update({file: "heldout" for file in section["heldout"]})
+    by_prompt: dict[str, set[str]] = {}
+    for record in dataset.records():
+        by_prompt.setdefault(record.prompt_id, set()).add(side[record.file])
+    assert len(by_prompt) == 20
+    assert all(len(sides) == 1 for sides in by_prompt.values())
+    assert {"train", "heldout"} == set().union(*by_prompt.values())
+
+
+def test_each_ambient_clip_gives_four_fifths_to_training_and_its_last_fifth_held_out(
+    tmp_path: Path,
+) -> None:
+    real = train.load_real(small_dataset(tmp_path), "autobot")
+    section = train.real_section(real, phrase_table("autobot"), exclude_near=True)
+    trained = {e["file"]: (e["start"], e["end"]) for e in section["ambient_trained"]}
+    held = {e["file"]: (e["start"], e["end"]) for e in section["ambient_heldout"]}
+    assert sorted(trained.values()) == [(0.0, 16.0), (0.0, 48.0)]
+    assert sorted(held.values()) == [(16.0, 20.0), (48.0, 60.0)]
+    for clip in real.ambient:
+        # In samples: the two parts meet, never overlap, and cover the clip.
+        assert clip.train[0] == 0
+        assert clip.train[1] == clip.heldout[0]
+        assert clip.heldout[1] == clip.samples
+        assert held[clip.record.file][0] == trained[clip.record.file][1]
+
+
+def spans_of(dataset: VoiceDataset, real: train.RealData) -> dict[str, tuple[int, int]]:
+    spans: dict[str, tuple[int, int]] = {}
+    for clip in real.clips:
+        if clip.split == SPLIT_TRAIN and clip.record.label == LABEL_POSITIVE:
+            start, end, _how = train.key_span(
+                dataset.load(clip.record).samples, clip.record, None
+            )
+            spans[clip.record.file] = (start, end)
+    return spans
+
+
+def test_no_training_window_is_cut_from_held_out_audio(tmp_path: Path) -> None:
+    dataset = small_dataset(tmp_path)
+    real = train.load_real(dataset, "autobot")
+    windows = train.plan_real_windows(
+        real,
+        phrase_table("autobot"),
+        spans_of(dataset, real),
+        np.random.default_rng(0),
+    )
+    held_files = set(real.files(SPLIT_HELDOUT))
+    assert held_files
+    covered: dict[str, set[int]] = {}
+    for window in windows:
+        clip = real.clips[window.clip]
+        assert window.end - window.start == train.SEQUENCE_SAMPLES
+        # No window comes from a held-out clip.
+        assert clip.record.file not in held_files
+        assert clip.split != SPLIT_HELDOUT
+        if clip.split == train.SPLIT_AMBIENT:
+            # An ambient window lies wholly inside the training four fifths:
+            # not one sample of the held-out last fifth is in it.
+            assert clip.train[0] <= window.start
+            assert window.end <= clip.train[1] == clip.heldout[0]
+            assert not set(range(window.start, window.end, 4000)) & set(
+                range(clip.heldout[0], clip.heldout[1], 4000)
+            )
+            covered.setdefault(clip.record.file, set()).add(window.start)
+    # The training part is used whole: 48 s and 16 s in 3 s windows.
+    assert sorted(len(starts) for starts in covered.values()) == [5, 16]
+    by_kind = {kind: 0 for kind in (KIND_POSITIVE, KIND_HARD, KIND_GENERIC, KIND_NOISE)}
+    for window in windows:
+        by_kind[window.kind] += 1
+    assert by_kind == {
+        KIND_POSITIVE: 4 * train.REAL_VARIANTS,
+        # "auto boot", "auto bought" and "autopilot" are in the phrase's table.
+        KIND_HARD: 3 * train.REAL_VARIANTS,
+        KIND_GENERIC: 1 * train.REAL_VARIANTS,
+        KIND_NOISE: 21 * train.REAL_VARIANTS,
+    }
+    # One window of each clip is as recorded, the others are augmented.
+    assert sum(not window.augment for window in windows) * train.REAL_VARIANTS == len(
+        windows
+    )
+    # The same plan every time.
+    again = train.plan_real_windows(
+        real, phrase_table("autobot"), spans_of(dataset, real), np.random.default_rng(0)
+    )
+    assert again == windows
+
+
+def test_real_windows_are_labelled_like_the_synthetic_ones(tmp_path: Path) -> None:
+    dataset = small_dataset(tmp_path)
+    real = train.load_real(dataset, "autobot")
+    table = phrase_table("autobot")
+    windows = train.plan_real_windows(
+        real, table, spans_of(dataset, real), np.random.default_rng(0)
+    )
+    meta = np.array(
+        [(w.kind, w.hard_id, w.clip, w.key_start, w.key_end) for w in windows],
+        dtype=np.int64,
+    )
+    for window in windows:
+        if window.kind == KIND_POSITIVE:
+            # The phrase ends 1.3 to 2.9 s into the window.
+            assert 1.3 * RATE <= window.key_end <= 2.9 * RATE
+            assert (
+                0
+                < window.key_end - window.key_start
+                <= train.REAL_PHRASE_SECONDS * RATE
+            )
+    labels = train.training_inputs(meta, table, exclude_near=True)
+    positive = meta[:, 0] == KIND_POSITIVE
+    # As with a synthetic window, the inputs that end up to half a second
+    # after the phrase are the positives; the first input ends 1.975 s in.
+    heard = positive & (meta[:, 4] + 0.5 * RATE >= train.INPUT_END_SAMPLE)
+    assert heard.sum() >= 8
+    assert (labels[heard] == 1).any(axis=1).all()
+    assert not (labels[~positive] == 1).any()
+    # The owner saying a near homophone is left out, like a synthetic one.
+    near = train.excluded_windows(meta, table)
+    assert int(near.sum()) == 2 * train.REAL_VARIANTS
+    assert (labels[near] == -1).all()
+    assert (train.training_inputs(meta, table, exclude_near=False)[near] == 0).all()
+
+
+def test_the_manifest_hash_follows_the_dataset(tmp_path: Path) -> None:
+    dataset = small_dataset(tmp_path)
+    first = train.load_real(dataset, "autobot")
+    assert len(first.manifest) == 40
+    assert train.load_real(dataset, "autobot") == first
+    assert [clip.record.file for clip in first.clips] == sorted(
+        record.file for record in dataset.records()
+    )
+    dataset.add(
+        Clip(speech_like(0.6), RATE), record_for(LABEL_POSITIVE, "autobot", "", 300)
+    )
+    second = train.load_real(dataset, "autobot")
+    assert second.manifest != first.manifest
+    # A clip recorded for another phrase is not this phrase's.
+    assert train.load_real(dataset, "hey computer").clips == ()
+
+
+def test_a_run_with_no_recordings_is_the_first_models_run(tmp_path: Path) -> None:
+    real = train.load_real(VoiceDataset(tmp_path / "voice"), "autobot")
+    assert real.clips == () and real.manifest == ""
+    table = phrase_table("autobot")
+    assert real.describe(table, True) == [
+        "real: no real recordings for 'autobot': synthetic clips only"
+    ]
+    section = train.real_section(real, table, True)
+    assert section["note"] == "no real recordings: synthetic clips only"
+    assert section["trained"] == section["heldout"] == section["ambient_heldout"] == []
+    # The same shards, the same checkpoint and the same batches as before.
+    run = train.Run(
+        phrase="autobot",
+        output=tmp_path / "candidate.onnx",
+        models=tmp_path,
+        work=tmp_path / "work",
+        scale=1,
+        steps=1000,
+        hidden=128,
+        threads=1,
+        dataset=tmp_path / "voice",
+    )
+    assert train.plan_shards(run.scale) == train.plan_shards(1)
+    assert run.real_manifest == ""
+    assert run.checkpoint.name == "ckpt-128-1000-x1-k1-n1.pt"
+    assert train.batch_plan(0, 0) == train.BatchPlan(256, 0, 384, 0)
+    assert train.real_feats(run, real).features.shape == (0, 28, 96)
+    assert not (tmp_path / "work").exists()
+
+
+def test_real_inputs_are_mixed_in_only_when_there_are_some() -> None:
+    assert train.batch_plan(517, 3805) == train.BatchPlan(128, 128, 256, 128)
+    # Recordings of room audio alone give negatives and no positives.
+    assert train.batch_plan(0, 40) == train.BatchPlan(256, 0, 256, 128)
+    assert train.batch_plan(3, 0) == train.BatchPlan(128, 128, 384, 0)
+    for plan in (train.batch_plan(1, 1), train.batch_plan(0, 0)):
+        assert plan.positives + plan.real_positives == train.POSITIVE_BATCH == 256
+        assert plan.negatives + plan.real_negatives == train.NEGATIVE_BATCH == 384
+
+
+def test_the_log_line_counts_what_is_trained_on_and_held_out(tmp_path: Path) -> None:
+    real = train.load_real(small_dataset(tmp_path), "autobot")
+    lines = real.describe(phrase_table("autobot"), exclude_near=True)
+    assert lines[0] == "real: 6 training clips, 4 held out, 0.3 min held-out ambient"
+    assert "left out 2 negatives" in lines[-1]
+    lines = real.describe(phrase_table("autobot"), exclude_near=False)
+    assert lines[0] == "real: 8 training clips, 4 held out, 0.3 min held-out ambient"
+
+
+def test_the_voiced_span_is_where_the_speech_is() -> None:
+    start, end = train.voiced_span(speech_like(0.6, lead=0.5, tail=0.9))
+    assert abs(start - 0.5 * RATE) <= 640
+    assert abs(end - 1.1 * RATE) <= 640
+    # A click is not speech, and a pause inside a word does not end it.
+    audio = speech_like(0.6, lead=0.5, tail=0.9)
+    audio[2 * RATE // 10 : 2 * RATE // 10 + 80] += 9000
+    audio[int(0.75 * RATE) : int(0.85 * RATE)] = 0
+    assert train.voiced_span(audio) == (start, end)
+    # Nothing above the floor: the clip is taken whole.
+    assert train.voiced_span(room(2.0)) == (0, 2 * RATE)
+
+
+def test_whether_a_prompt_ends_with_the_phrase_is_read_from_the_manifest() -> None:
+    def last(prompt: str, prompt_id: str = "p-01") -> bool:
+        return train.phrase_last(record_for(LABEL_POSITIVE, prompt, prompt_id, 0))
+
+    assert last("autobot") and last("hey autobot") and last("Yo, Autobot.")
+    assert not last("autobot, what time is it")
+    assert not last("so autobot, what's the news")
+    # A clip with no script prompt is not known to end with the phrase.
+    assert not last("monitor: missed wake", "")
+    assert not last("autobot", "")
+
+
+def test_the_phrase_is_found_among_transcribed_words() -> None:
+    words = [(" Hey", 0.0, 1.06), (" Autobot,", 1.06, 1.68), (" what's", 1.9, 2.14)]
+    assert train.find_phrase(words, "autobot") == (1.06, 1.68)
+    split_up = [(" so", 0.7, 1.3), (" auto", 1.3, 1.6), (" bot.", 1.6, 1.9)]
+    assert train.find_phrase(split_up, "autobot") == (1.3, 1.9)
+    misheard = [(" Bottlebot,", 1.16, 1.8), (" who", 2.12, 2.24), (" won", 2.24, 2.4)]
+    assert train.find_phrase(misheard, "autobot") is None
+    # The word the prompt has after the phrase says where the phrase ended.
+    prompt = "autobot, who won the game last night"
+    anchored = train.find_phrase(misheard, "autobot", prompt)
+    assert anchored is not None
+    assert anchored[0] == pytest.approx(1.12) and anchored[1] == 2.12
+    assert train.find_phrase(misheard, "autobot", prompt, spelled_only=True) is None
+    close = [(" Ottobot", 0.9, 1.5), (" stop.", 1.6, 1.9)]
+    assert train.find_phrase(close, "autobot") == (0.9, 1.5)
+    assert train.find_phrase([], "autobot", prompt) is None
+    assert train.find_phrase([(" stop.", 0.0, 1.8)], "autobot", "autobot, stop") is None
+
+
+def test_a_sentence_positive_ends_where_the_words_say_not_where_the_speech_does() -> (
+    None
+):
+    audio = speech_like(2.0, lead=0.5, tail=0.8)
+    sentence = record_for(LABEL_POSITIVE, "autobot, what time is it", "sentence-01", 1)
+    asked: list[str] = []
+
+    def locate(samples: train.Int16, record: ClipRecord) -> tuple[float, float] | None:
+        asked.append(record.prompt_id)
+        return (0.55, 1.1)
+
+    start, end, how = train.key_span(audio, sentence, locate)
+    assert (how, end) == ("words", round(1.1 * RATE))
+    assert start <= round(0.6 * RATE)
+    # Not found, or no transcriber: the end of the speech, as the plan has it.
+    voiced_end = train.voiced_span(audio)[1]
+    assert train.key_span(audio, sentence, lambda samples, record: None)[1:] == (
+        voiced_end,
+        "fallback",
+    )
+    assert train.key_span(audio, sentence, None)[1:] == (voiced_end, "fallback")
+    # A prompt that ends with the phrase is never transcribed.
+    asked.clear()
+    bare = record_for(LABEL_POSITIVE, "hey autobot", "hey-01", 2)
+    assert train.key_span(audio, bare, locate)[1:] == (voiced_end, "span")
+    assert asked == []
+
+
+def fake_banks(work: Path) -> None:
+    """The noise and impulse-response banks, small: what `Augmenter` loads."""
+    rng = np.random.default_rng(0)
+    work.mkdir(parents=True, exist_ok=True)
+    train.save_npz(
+        work / "noise16k.npz",
+        audio=rng.integers(-2000, 2000, (10, 5 * RATE)).astype(np.int16),
+        fold=np.arange(10) % 5 + 1,
+    )
+    responses = np.zeros((20, 400), dtype=np.float32)
+    responses[:, 0] = 1.0
+    train.save_npz(work / "rir16k.npz", rir=responses)
+
+
+def test_the_real_features_are_cut_from_the_training_side_and_cached(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("scipy", reason="the augmentation needs the 'train' extra")
+    dataset = small_dataset(tmp_path / "voice")
+    real = train.load_real(dataset, "autobot")
+    work = tmp_path / "work"
+    fake_banks(work)
+    run = train.Run(
+        phrase="autobot",
+        output=tmp_path / "candidate.onnx",
+        models=resolve_repo_path("models"),
+        work=work,
+        scale=1,
+        steps=10,
+        hidden=8,
+        threads=1,
+        dataset=dataset.root,
+        real_manifest=real.manifest,
+    )
+    located: list[str] = []
+
+    def locate(samples: train.Int16, record: ClipRecord) -> tuple[float, float] | None:
+        located.append(record.prompt)
+        return (0.5, 1.2)
+
+    made = train.real_feats(run, real, lambda: locate)
+    # Only the sentence prompt needed its words found.
+    assert located == ["autobot, what time is it"]
+    count = (4 + 4 + 21) * train.REAL_VARIANTS
+    assert made.features.shape == (count, 28, 96)
+    assert made.features.dtype == np.float16
+    assert made.meta.shape == (count, 5) and made.source.shape == (count, 3)
+    assert made.files == tuple(clip.record.file for clip in real.clips)
+    # Window by window: nothing from a held-out clip, nothing from the last
+    # fifth of an ambient recording.
+    held_files = set(real.files(SPLIT_HELDOUT))
+    for clip_index, first, last in made.source.tolist():
+        clip = real.clips[clip_index]
+        assert made.files[clip_index] not in held_files
+        if clip.split == train.SPLIT_AMBIENT:
+            assert 0 <= first and last <= clip.heldout[0]
+    cache = work / "real" / f"{real.manifest}.npz"
+    assert [path.name for path in (work / "real").iterdir()] == [cache.name]
+
+    def never() -> train.Locator:
+        raise AssertionError("a cached run does not transcribe again")
+
+    again = train.real_feats(run, real, never)
+    assert np.array_equal(again.features, made.features)
+    assert np.array_equal(again.meta, made.meta)
+    # A grown dataset gets a new cache and the old one goes.
+    dataset.add(
+        Clip(speech_like(0.6), RATE), record_for(LABEL_POSITIVE, "autobot", "", 400)
+    )
+    grown = train.load_real(dataset, "autobot")
+    train.real_feats(run, grown, lambda: locate)
+    assert [path.name for path in (work / "real").iterdir()] == [
+        f"{grown.manifest}.npz"
+    ]
+
+
+def test_a_part_of_a_long_recording_is_read_without_the_rest(tmp_path: Path) -> None:
+    audio = np.arange(5 * RATE, dtype=np.int64).astype(np.int16)
+    dataset = VoiceDataset(tmp_path)
+    stored = dataset.add(
+        Clip(audio, RATE), record_for(LABEL_AMBIENT, "say nothing", "ambient-01", 1)
+    )
+    part = train.read_samples(dataset.path(stored), 2 * RATE, RATE)
+    assert np.array_equal(part, audio[2 * RATE : 3 * RATE])
+    # Past the end there is nothing, not an error.
+    assert len(train.read_samples(dataset.path(stored), 5 * RATE, RATE)) == 0
+    assert len(train.read_samples(dataset.path(stored), 4 * RATE + 8000, RATE)) == 8000
+
+
+def test_a_clip_in_another_format_is_one_line(tmp_path: Path) -> None:
+    dataset = VoiceDataset(tmp_path)
+    dataset.add(
+        Clip(room(1.0), 8000), record_for(LABEL_POSITIVE, "autobot", "bare-01", 1)
+    )
+    with pytest.raises(TrainError, match="not a 16000 Hz mono 16-bit WAV") as error:
+        train.load_real(dataset, "autobot")
+    assert "\n" not in str(error.value)

@@ -1,11 +1,41 @@
-"""Publish each `WakeEvent` as one JSON line: to the log and to a socket.
+"""Publish the listener's events as JSON lines: wakes and stretch scores.
 
-The line is the hand-off seam to the routing layer (plan section 9 item 8):
+Every event is one JSON object on one line, UTF-8, ending in a newline. `at`
+is ISO 8601 in UTC with milliseconds. There are two events.
 
-    {"event": "wake", "phrase": "autobot", "target": "ack",
-     "kind": "text_match", "score": 0.79, "at": "2026-11-25T21:40:03.512+00:00"}
+**`wake`**: a wake phrase was heard (`WakeEvent`). It goes to the log and to
+the socket. It is the hand-off seam to the routing layer:
 
-on one line, UTF-8, ending in a newline. `at` is ISO 8601 in UTC.
+    {"event": "wake", "phrase": "autobot", "target": "ack", "kind": "text_match", "score": 0.79, "at": "2026-11-25T21:40:03.512+00:00"}
+
+**`score`**: what one detector made of one stretch of speech (`ScoreEvent`).
+It goes to the socket only, never to the log, so the log holds what it always
+held. The live monitor reads it:
+
+    {"event": "score", "phrase": "autobot", "kind": "openwakeword", "score": 0.912, "stretch": 7, "at": "2026-11-26T18:02:11.480+00:00"}
+
+- `phrase` and `kind` are the configured wake phrase and its detector kind.
+  A stretch yields one `score` line per configured wake phrase, in the order
+  of the configuration, all with the same `stretch`.
+- `score` is the detector's score for the stretch, from 0 to 1, rounded to
+  three decimals: for `openwakeword` the model's highest score over the
+  stretch (`last_peak`); for `text_match` the confidence of the stretch's
+  last transcript (`last_transcript.score`). It is `null` when the detector
+  produced no score for the stretch (a detector kind with neither figure, or
+  a `text_match` stretch that was not transcribed).
+- `stretch` is the stretch identifier: an integer that starts at 1 with each
+  listener run and rises by one per stretch. It is the name to give
+  `python -m autobot.listener.control snapshot --stretch`. The listener holds
+  the audio of the last five only.
+- `at` is when the line was published: the end of the stretch, or the wake
+  that closed its score early (below).
+
+**Order.** A stretch's `score` lines are published before any `wake` it
+causes, so a reader ties a `wake` to the stretch of the `score` lines just
+before it. A stretch is scored once: when it ends, or, when a detector fires
+inside it, at that moment, just before the first `wake` (the `score` of the
+detector that fired is then the score it fired at). See
+`autobot.listener.service` for which audio a stretch is.
 
 Socket semantics (`run/listener.sock`):
 
@@ -13,10 +43,10 @@ Socket semantics (`run/listener.sock`):
   Readers connect to it; any number may be connected at once.
 - Every event is **broadcast** to every reader connected at that moment.
   There is no backlog and no replay: a reader gets the events published after
-  it connected. The log holds the history.
+  it connected. The log holds the history of the wakes.
 - The listener only writes. Anything a reader sends is ignored.
 - Publishing never blocks the audio loop. Connections are accepted and written
-  without blocking; with no reader connected the line goes to the log only. A
+  without blocking; with no reader connected a wake goes to the log only. A
   reader that has disconnected, or is so far behind that its socket buffer is
   full, is dropped: it must reconnect.
 - The socket file is created with mode 0600, when the listener starts, and
@@ -31,6 +61,8 @@ import json
 import os
 import socket
 import sys
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from types import TracebackType
 from typing import Self, TextIO
@@ -45,8 +77,35 @@ class AlreadyRunningError(Exception):
     """Another listener holds the socket. The message is one line."""
 
 
-def to_json_line(event: WakeEvent) -> str:
+@dataclass(frozen=True)
+class ScoreEvent:
+    """What one detector made of one stretch of speech."""
+
+    # The configured phrase, as written in the configuration.
+    phrase: str
+    # The detector kind that scored it.
+    kind: str
+    # The detector's score for the stretch, from 0 to 1; None when it has none.
+    score: float | None
+    # The stretch identifier: 1 for the first stretch of a listener run.
+    stretch: int
+    # When the score was published: timezone-aware, UTC.
+    at: datetime
+
+
+def to_json_line(event: WakeEvent | ScoreEvent) -> str:
     """The event as its one JSON line, without the newline."""
+    if isinstance(event, ScoreEvent):
+        return json.dumps(
+            {
+                "event": "score",
+                "phrase": event.phrase,
+                "kind": event.kind,
+                "score": event.score,
+                "stretch": event.stretch,
+                "at": event.at.isoformat(timespec="milliseconds"),
+            }
+        )
     return json.dumps(
         {
             "event": "wake",
@@ -133,11 +192,15 @@ class EventPublisher:
             reader.setblocking(False)
             self._readers.append(reader)
 
-    def publish(self, event: WakeEvent) -> str:
-        """Write the event's line to the log and to every reader; return the line."""
+    def publish(self, event: WakeEvent | ScoreEvent) -> str:
+        """Write the event's line to every reader; return the line.
+
+        A wake event goes to the log as well. A score event does not.
+        """
         line = to_json_line(event)
-        stream = self._log_stream if self._log_stream is not None else sys.stdout
-        print(line, file=stream, flush=True)
+        if isinstance(event, WakeEvent):
+            stream = self._log_stream if self._log_stream is not None else sys.stdout
+            print(line, file=stream, flush=True)
         self.poll()
         data = (line + "\n").encode()
         kept: list[socket.socket] = []

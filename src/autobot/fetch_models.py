@@ -11,7 +11,10 @@ Without options it fetches what the listener and the tests need:
 - openWakeWord's two feature models (`models/openwakeword/`),
 - Silero VAD (`models/silero/`),
 - faster-whisper `tiny.en` (`models/faster-whisper/tiny.en/`),
-- the acknowledgement's piper voice (`models/piper/`).
+- the acknowledgement's piper voice, Joe Medium (`en_US-joe-medium`, unless
+  `[ack] voice` names another), into `models/piper/`,
+- the sherpa-onnx keyword-spotting model of the `sherpa_kws` kind
+  (`models/sherpa-kws/`): a 17 MB archive, of which five files are kept.
 
 The trained wake-word model itself is not fetched: `make train-wakeword`
 builds it.
@@ -30,9 +33,11 @@ again. A larger `--acav-gb` extends the negative-features file it finds.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import sys
+import tarfile
 import time
 import urllib.error
 import urllib.request
@@ -42,6 +47,11 @@ from pathlib import Path
 from typing import Any
 
 from autobot.config import AckConfig, ConfigError, load_config, resolve_repo_path
+from autobot.listener.engines.sherpa_kws import (
+    SHERPA_KWS_DIR,
+    SHERPA_KWS_FILES,
+    SHERPA_KWS_MODEL,
+)
 from autobot.listener.models import MODELS_DIR
 from autobot.wakeword.data import HELDOUT_VOICES, TRAIN_VOICES
 
@@ -62,6 +72,13 @@ FEATURES_URL = (
 ACAV_NAME = "openwakeword_features_ACAV100M_2000_hrs_16bit.npy"
 RIR_DATASET = "davidscripka/MIT_environmental_impulse_responses"
 ESC50_URL = "https://github.com/karoldvl/ESC-50/archive/master.zip"
+# The keyword-spotting model of the `sherpa_kws` kind, and the checksum the
+# release publishes for it (kws-models/checksum.txt).
+SHERPA_KWS_URL = (
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/"
+    f"{SHERPA_KWS_MODEL}.tar.bz2"
+)
+SHERPA_KWS_SHA256 = "f170013b4716e41b62b9bfd809687c207cef798ef9bc6534d524e17af9b6561a"
 
 # The negative-features file: a 128-byte header, then float16 rows of [16, 96].
 ACAV_HEADER_BYTES = 128
@@ -268,6 +285,59 @@ def fetch_noise(models: Path) -> None:
     say(f"fetched {out}")
 
 
+def sha256_of(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(CHUNK_BYTES):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def fetch_sherpa_kws(models: Path) -> bool:
+    """The `sherpa_kws` model: the files the engine loads, out of the release archive.
+
+    Returns False when they were all there already. The archive is checked
+    against the published checksum before anything is taken out of it.
+    """
+    directory = models / SHERPA_KWS_DIR.relative_to(MODELS_DIR)
+    if all((directory / name).is_file() for name in SHERPA_KWS_FILES):
+        return False
+    archive = directory / f"{SHERPA_KWS_MODEL}.tar.bz2"
+    fetch(SHERPA_KWS_URL, archive)
+    found = sha256_of(archive)
+    if found != SHERPA_KWS_SHA256:
+        archive.unlink()
+        raise FetchError(
+            f"{SHERPA_KWS_URL} does not match its published checksum "
+            f"(sha256 {found}); the download was deleted, run it again"
+        )
+    unpacking = directory / "unpack.tmp"
+    shutil.rmtree(unpacking, ignore_errors=True)
+    unpacking.mkdir(parents=True)
+    try:
+        with tarfile.open(archive, "r:bz2") as bundle:
+            for member in bundle:
+                name = Path(member.name).name
+                if not member.isfile() or name not in SHERPA_KWS_FILES:
+                    continue
+                source = bundle.extractfile(member)
+                if source is not None:
+                    # Only the base name is used: a member cannot write elsewhere.
+                    with source, (unpacking / name).open("wb") as handle:
+                        shutil.copyfileobj(source, handle)
+    except (tarfile.TarError, OSError, EOFError) as error:
+        raise FetchError(f"cannot unpack {archive}: {type(error).__name__}") from None
+    missing = [name for name in SHERPA_KWS_FILES if not (unpacking / name).is_file()]
+    if missing:
+        raise FetchError(f"{archive} does not hold {missing[0]}")
+    for name in SHERPA_KWS_FILES:
+        (unpacking / name).replace(directory / name)
+    unpacking.rmdir()
+    archive.unlink()
+    say(f"fetched {directory}")
+    return True
+
+
 def ack_voice() -> str:
     """The configured acknowledgement voice; the default when there is no config."""
     try:
@@ -300,11 +370,22 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     models = resolve_repo_path(MODELS_DIR)
     try:
-        assets = runtime_assets(ack_voice())
+        runtime = runtime_assets(ack_voice())
+        assets = list(runtime)
         if args.training:
             assets += training_assets(args.acav_gb)
-        fetched = sum(
-            fetch(asset.url, models / asset.path, asset.limit) for asset in assets
+        fetched = 0
+        for asset in assets:
+            new = fetch(asset.url, models / asset.path, asset.limit)
+            fetched += new
+            # The listener's files are few: name each, so the owner sees what
+            # a fresh install has. The training's are counted in the last line.
+            if asset in runtime:
+                say(f"  {'fetched' if new else 'have   '}  {MODELS_DIR / asset.path}")
+        new = fetch_sherpa_kws(models)
+        say(
+            f"  {'fetched' if new else 'have   '}  {SHERPA_KWS_DIR}/ "
+            f"({len(SHERPA_KWS_FILES)} files: the sherpa_kws baseline)"
         )
         if args.training:
             fetch_impulse_responses(models)

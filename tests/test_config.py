@@ -7,8 +7,11 @@ import pytest
 
 from autobot.config import (
     CONFIG_ENV_VAR,
+    KIND_TEXT_MATCH,
+    TUI_THEMES,
     Config,
     ConfigError,
+    TuiConfig,
     config_path,
     load_config,
     parse_config,
@@ -35,7 +38,10 @@ target = "ack"
 
 [ack]
 text = "Yes?"
-voice = "en_US-lessac-medium"
+voice = "en_US-joe-medium"
+
+[tui]
+theme = "dark"
 """
 
 
@@ -44,7 +50,8 @@ def valid_data() -> dict[str, Any]:
         "host": {"nuc_hostname": "nuc"},
         "audio": {"input_device": "pipewire", "output_device": "pipewire"},
         "wake_phrases": [{"phrase": "autobot", "kind": "text_match", "target": "ack"}],
-        "ack": {"text": "Yes?", "voice": "en_US-lessac-medium"},
+        "ack": {"text": "Yes?", "voice": "en_US-joe-medium"},
+        "tui": {"theme": "sun"},
     }
 
 
@@ -88,6 +95,20 @@ def test_the_committed_config_loads(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.ack.text == "Yes?"
 
 
+def test_the_committed_config_is_a_fresh_install(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # TS-2 and TS-15: no trained model is configured, Joe Medium speaks, and
+    # the interface opens in the first theme.
+    monkeypatch.delenv(CONFIG_ENV_VAR, raising=False)
+    config = load_config()
+    phrase = config.wake_phrases[0]
+    assert (phrase.kind, phrase.model, phrase.threshold) == (KIND_TEXT_MATCH, "", 0.5)
+    assert phrase.model_path is None
+    assert config.ack.voice == "en_US-joe-medium"
+    assert config.tui == TuiConfig(theme="light")
+
+
 def test_load_config_reads_every_field(tmp_path: Path) -> None:
     config = load_config(write(tmp_path, VALID_TOML))
     assert config.host.nuc_hostname == "nuc"
@@ -109,7 +130,8 @@ def test_load_config_reads_every_field(tmp_path: Path) -> None:
         "ack",
     )
     assert phrase.model_path is None
-    assert config.ack.voice == "en_US-lessac-medium"
+    assert config.ack.voice == "en_US-joe-medium"
+    assert config.tui.theme == "dark"
 
 
 def test_load_config_honours_the_env_override(
@@ -142,7 +164,10 @@ def test_defaults_apply_to_optional_keys() -> None:
     data = valid_data()
     del data["host"]
     del data["ack"]
+    del data["tui"]
     config = parse_config(data)
+    assert config.ack.voice == "en_US-joe-medium"
+    assert config.tui.theme == "light"
     assert config.host.nuc_hostname == ""
     assert config.audio.sample_rate == 16000
     assert config.audio.frame_ms == 80
@@ -165,6 +190,21 @@ def test_openwakeword_model_path_resolves_against_the_repo_root() -> None:
     )
     phrase = parse_config(data).wake_phrases[0]
     assert phrase.model_path == repo_root() / "models" / "wakeword" / "autobot.onnx"
+
+
+def test_every_theme_name_is_accepted() -> None:
+    assert TUI_THEMES == ("light", "dark", "sun")
+    for theme in TUI_THEMES:
+        assert parse_config(set_key("tui", "theme", theme)).tui.theme == theme
+
+
+def test_an_unknown_theme_fails_to_load_naming_the_key(tmp_path: Path) -> None:
+    path = write(tmp_path, VALID_TOML.replace('theme = "dark"', 'theme = "neon"'))
+    with pytest.raises(ConfigError) as raised:
+        load_config(path)
+    message = str(raised.value)
+    assert "[tui] theme = 'neon' is not one of: light, dark, sun" in message
+    assert "\n" not in message
 
 
 def set_key(table: str, key: str, value: object) -> dict[str, Any]:
@@ -207,6 +247,10 @@ def set_key(table: str, key: str, value: object) -> dict[str, Any]:
         (set_key("wake_phrases", "target", ""), "target must not be empty"),
         (set_key("ack", "text", ""), "text must not be empty"),
         (set_key("ack", "voice", 3), "voice must be a string"),
+        (set_key("tui", "theme", "neon"), r"\[tui\] theme = 'neon' is not one of"),
+        (set_key("tui", "theme", 3), r"\[tui\] theme must be a string"),
+        (set_key("tui", "colour", "red"), r"\[tui\] unknown key: colour"),
+        ({**valid_data(), "tui": "dark"}, r"\[tui\] must be a table"),
     ],
 )
 def test_invalid_config_is_rejected(data: dict[str, Any], message: str) -> None:

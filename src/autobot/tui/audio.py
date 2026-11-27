@@ -1,6 +1,6 @@
-"""Audio logic for the Audio screen: devices, levels, clips. No drawing.
+"""Audio logic for the interface: devices, levels, clips. No drawing.
 
-The pure parts (`usable_devices`, `Capture`, `meter_cells`,
+The pure parts (`usable_devices`, `Capture`, `meter_cells`, `clip_peak`,
 `sanitise_clip_name`, `write_wav`) are tested with fakes. `AudioBackend` is
 the seam to the hardware; `SoundDeviceBackend` is the real one and is the only
 code here that touches `sounddevice`, which it imports lazily so that
@@ -50,6 +50,9 @@ PEAK_HOLD_DECAY = 0.9
 # Names PipeWire gives the ALSA devices that follow its default source and sink.
 PIPEWIRE_DEVICE_NAMES = ("pipewire", "default")
 
+# The committed test fixtures. Nothing is saved here as a side effect: a clip
+# is recorded into the voice dataset (`autobot.wakeword.dataset`) and a
+# fixture is a deliberate export of one.
 FIXTURE_DIR = Path("tests/fixtures/audio")
 MAX_CLIP_NAME = 64
 
@@ -165,6 +168,15 @@ def meter_zones(width: int) -> tuple[int, int]:
 
 # --- capture ----------------------------------------------------------------
 
+# A block whose peak is at or below this is digital silence: a working
+# microphone in the quietest room still delivers more.
+SILENT_PEAK = 3
+# The input has to be digital silence for this long before the interface says
+# so: a stream may open with a moment of zeros.
+SILENCE_WARNING_SECONDS = 2.0
+# What the interface shows while it lasts.
+SILENCE_WARNING = "the microphone delivers silence: check its mute button"
+
 
 @dataclass(frozen=True)
 class Clip:
@@ -180,22 +192,64 @@ class Clip:
         return levels(self.samples.tolist())[0]
 
 
+@dataclass(frozen=True)
+class StreamedClip:
+    """A recording that was written to a WAV file as it was made."""
+
+    path: Path
+    sample_rate: int
+    samples: int
+    peak: int
+    # One line when writing the file failed part of the way; empty otherwise.
+    error: str = ""
+
+    @property
+    def seconds(self) -> float:
+        return self.samples / self.sample_rate
+
+
+def clip_peak(samples: Samples) -> int:
+    """The largest sample magnitude, without leaving numpy (a long clip is slow otherwise)."""
+    if len(samples) == 0:
+        return 0
+    return int(np.abs(samples.astype(np.int32)).max())
+
+
 class Capture:
     """Takes blocks from the input stream; keeps the level and records clips.
 
     `feed` runs on the audio thread; everything else on the interface's. One
     stream therefore serves both the meter and the recording.
+
+    A recording is held in memory and handed over by `take_clip`, unless
+    `start_recording` is given a file to stream to: then every block is
+    written to that WAV as it arrives, nothing is kept in memory, and the
+    result comes from `take_streamed`. That is how an hour of room audio is
+    recorded.
+
+    It also counts how long the input has been digital silence without a
+    break (`silent_seconds`), so that a muted microphone is seen on the meter
+    before anything is recorded (`delivering_silence`).
     """
 
     def __init__(self, sample_rate: int, max_seconds: float = MAX_CLIP_SECONDS) -> None:
         self.sample_rate = sample_rate
+        # The limit of a recording that names none of its own.
         self.max_samples = int(max_seconds * sample_rate)
+        self._limit = self.max_samples
         self._lock = threading.Lock()
         self._level = Level()
+        # Samples of digital silence in a row, up to now.
+        self._silent = 0
         self._recording = False
         self._blocks: list[Samples] = []
         self._recorded = 0
+        self._peak = 0
         self._finished: Clip | None = None
+        self._wav: wave.Wave_write | None = None
+        self._wav_path: Path | None = None
+        self._wav_error = ""
+        self._streamed: StreamedClip | None = None
 
     def feed(self, block: Samples) -> None:
         """Take one block of mono int16 samples."""
@@ -203,13 +257,24 @@ class Capture:
         with self._lock:
             hold = max(float(peak), self._level.hold * PEAK_HOLD_DECAY)
             self._level = Level(peak, rms, hold)
+            self._silent = self._silent + len(block) if peak <= SILENT_PEAK else 0
             if not self._recording:
                 return
-            room = self.max_samples - self._recorded
-            taken = block[:room].copy()
-            self._blocks.append(taken)
+            room = self._limit - self._recorded
+            taken = block[:room]
+            if self._wav is not None:
+                try:
+                    self._wav.writeframes(taken.astype("<i2").tobytes())
+                except OSError as error:
+                    # A full disk, say: keep what was written and stop.
+                    self._wav_error = error.strerror or str(error)
+                    self._finish()
+                    return
+            else:
+                self._blocks.append(taken.copy())
             self._recorded += len(taken)
-            if self._recorded >= self.max_samples:
+            self._peak = max(self._peak, peak)
+            if self._recorded >= self._limit:
                 self._finish()
 
     def level(self) -> Level:
@@ -219,6 +284,18 @@ class Capture:
     def reset_level(self) -> None:
         with self._lock:
             self._level = Level()
+            self._silent = 0
+
+    @property
+    def silent_seconds(self) -> float:
+        """How long the input has been digital silence, without a break, up to now."""
+        with self._lock:
+            return self._silent / self.sample_rate
+
+    @property
+    def delivering_silence(self) -> bool:
+        """Whether the input has been digital silence for `SILENCE_WARNING_SECONDS`."""
+        return self.silent_seconds >= SILENCE_WARNING_SECONDS
 
     @property
     def recording(self) -> bool:
@@ -230,11 +307,49 @@ class Capture:
         with self._lock:
             return self._recorded / self.sample_rate
 
-    def start_recording(self) -> None:
+    @property
+    def limit_seconds(self) -> float:
+        """How long the current (or the last) recording may run."""
         with self._lock:
+            return self._limit / self.sample_rate
+
+    def start_recording(
+        self, max_seconds: float | None = None, stream_to: Path | None = None
+    ) -> None:
+        """Start a recording that stops by itself after `max_seconds`.
+
+        With `stream_to`, the audio goes to that WAV file as it arrives.
+        Raises `AudioError` when the file cannot be created.
+        """
+        wav: wave.Wave_write | None = None
+        if stream_to is not None:
+            try:
+                stream_to.parent.mkdir(parents=True, exist_ok=True)
+                # Open for the whole recording: `_finish` closes it.
+                wav = wave.open(str(stream_to), "wb")  # noqa: SIM115
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(self.sample_rate)
+            except OSError as error:
+                raise AudioError(
+                    f"cannot write {stream_to}: {error.strerror or error}"
+                ) from None
+        with self._lock:
+            if self._recording:
+                self._finish()
             self._blocks = []
             self._recorded = 0
+            self._peak = 0
             self._finished = None
+            self._streamed = None
+            self._wav = wav
+            self._wav_path = stream_to
+            self._wav_error = ""
+            self._limit = (
+                self.max_samples
+                if max_seconds is None
+                else max(1, int(max_seconds * self.sample_rate))
+            )
             self._recording = True
 
     def stop_recording(self) -> None:
@@ -248,8 +363,27 @@ class Capture:
             clip, self._finished = self._finished, None
             return clip
 
+    def take_streamed(self) -> StreamedClip | None:
+        """The file of a streamed recording that has ended, once; None otherwise."""
+        with self._lock:
+            streamed, self._streamed = self._streamed, None
+            return streamed
+
     def _finish(self) -> None:
         self._recording = False
+        if self._wav is not None:
+            assert self._wav_path is not None
+            error = self._wav_error
+            try:
+                self._wav.close()
+            except OSError as close_error:
+                error = error or close_error.strerror or str(close_error)
+            self._streamed = StreamedClip(
+                self._wav_path, self.sample_rate, self._recorded, self._peak, error
+            )
+            self._wav = None
+            self._wav_path = None
+            return
         if self._blocks:
             samples = np.concatenate(self._blocks).astype(np.int16)
         else:
@@ -265,8 +399,8 @@ def sanitise_clip_name(name: str) -> str:
     """Turn what the owner typed into a safe `.wav` file name.
 
     Only letters, digits, `.`, `_` and `-` survive; anything else, including
-    path separators, becomes `-`, so the name cannot leave the fixture
-    directory. Raises `ValueError` when nothing usable is left.
+    path separators, becomes `-`, so the name cannot leave the directory the
+    clip is saved in. Raises `ValueError` when nothing usable is left.
     """
     stem = name.strip()
     if stem.lower().endswith(".wav"):

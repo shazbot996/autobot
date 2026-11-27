@@ -17,26 +17,44 @@ Stages, each cached under `models/wakeword/work/<phrase>/`:
    noise and sometimes background speech, and turned into openWakeWord
    features (`feats/<shard>.npz`). A training window is 3 s: 28 embeddings,
    so 13 model inputs, each labelled by where the phrase ends in it.
-3. **train**: a small network on the 16 x 96 features, against those windows
-   and openWakeWord's general negative features. Checkpointed every 1000
-   steps (`ckpt-<hidden>-<steps>.pt`: one per network size, schedule and
-   loss, so trying another does not throw a finished run away).
-4. **eval**: recall on voices never used in training, false accepts on hard
+3. **real**: the owner's recordings in the voice dataset (`data/voice/`,
+   `autobot.wakeword.dataset`). The training side of the dataset's split is
+   cut into the same 3 s windows, one as recorded and two through the
+   augmentation, and featurised (`real/<manifest-sha1>.npz`). The held-out
+   side is never cut into a training window: the held-out prompts, and the
+   last fifth of every ambient recording, are what the evaluation scores.
+4. **train**: a small network on the 16 x 96 features, against those windows
+   and openWakeWord's general negative features. When there are real
+   recordings, half of every batch of positives and a third of every batch
+   of negatives are real, so a session of fifty clips is heard as often as
+   the synthetic set. Checkpointed every 1000 steps
+   (`ckpt-<hidden>-<steps>[-variant].pt`: one per network size, schedule,
+   loss and kind of data, so trying another does not throw a finished run
+   away).
+5. **eval**: recall on voices never used in training, false accepts on hard
    negatives, and false accepts per hour on openWakeWord's validation
    features, for a sweep of thresholds. The hard negatives that sound the
    same as the phrase (`PhraseTable.train_excluded`) are reported on their
-   own and are not counted with the others.
-5. **install**: the ONNX file and a `.json` of the metrics are moved into
-   place with `os.replace`, so a running listener never reads half a file.
-   The model that was there is kept as `<name>.prev.onnx`.
+   own and are not counted with the others. Then, separately, the real
+   figures: the exported ONNX is scored on the held-out real recordings by
+   `autobot.wakeword.evaluate`, and the threshold is recommended on them
+   when there is a held-out real positive to recommend it on.
+6. **export**: the ONNX file and a `.json` of the metrics are written as a
+   *candidate* (`models/wakeword/candidate.onnx` and `candidate.json`) with
+   `os.replace`. Nothing here installs a model: the installed model file and
+   `config/autobot.toml` are never touched. The interface (`make deploy`)
+   compares the candidate with the installed model and installs it when the
+   owner confirms (`autobot.wakeword.install`).
 
-Three options change what the network is trained against, for comparing
-models on the same cached features: `--exclude-near-homophones` leaves the
-windows of `PhraseTable.train_excluded` out of the training,
-`--hard-topk-weight` weights the loss on the hardest hard negatives (0 drops
-it) and `--negative-weight` weights every negative term. `--name` writes the
-result to `candidates/<name>.onnx` beside the installed model and leaves the
-installed model alone.
+The hard negatives that sound the same as the phrase
+(`PhraseTable.train_excluded`) are left out of the training by default: of
+the models compared on the same cached features, the one trained without
+them missed least at low false-accept rates. `--no-exclude-near-homophones`
+trains on them again. `--hard-topk-weight` weights the loss on the hardest
+hard negatives (0 drops it) and `--negative-weight` weights every negative
+term. `--name` writes the result to `candidates/<name>.onnx` instead, for
+experiments; the interface installs only `candidate.onnx`. `--dataset` reads
+the recordings from another directory than `data/voice/`.
 
 Shards are additive: a larger `--scale` adds shards and keeps every finished
 one, so a short first run is not wasted. A shard is identified by its name
@@ -48,22 +66,24 @@ one stops the run with one line saying so.
 
 The training-only libraries (`torch`, `scipy`, `soundfile`, `onnx`) are the
 `train` extra of `pyproject.toml` and are imported inside the functions that
-use them.
+use them, as is `faster_whisper`, so importing this module needs `numpy`
+only and `autobot.wakeword.evaluate` can use what it shares with it.
 """
 
 from __future__ import annotations
 
 import argparse
+import difflib
 import hashlib
 import json
 import math
 import os
-import shutil
 import sys
 import time
 import warnings
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+import wave
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -75,9 +95,11 @@ from autobot.listener.engines.openwakeword import (
     EMBEDDING_SIZE,
     FRAME_SAMPLES,
     MODEL_EMBEDDINGS,
+    PRIME_NOISE_LEVEL,
     SAMPLE_RATE,
 )
 from autobot.listener.models import (
+    FASTER_WHISPER_MODEL_DIR,
     MODELS_DIR,
     WAKEWORD_MODELS_DIR,
     enforce_offline,
@@ -92,6 +114,18 @@ from autobot.wakeword.data import (
     PhraseTable,
     phrase_table,
 )
+from autobot.wakeword.dataset import (
+    HELDOUT,
+    LABEL_AMBIENT,
+    LABEL_NEGATIVE,
+    LABEL_POSITIVE,
+    VOICE_DIR,
+    ClipRecord,
+    DatasetError,
+    VoiceDataset,
+    ambient_slices,
+    split,
+)
 
 type Int16 = npt.NDArray[np.int16]
 type Float32 = npt.NDArray[np.float32]
@@ -99,6 +133,11 @@ type Int64 = npt.NDArray[np.int64]
 
 SPLIT_TRAIN = "train"
 SPLIT_HELDOUT = "heldout"
+# A real ambient recording is on both sides: split by time, not by clip.
+SPLIT_AMBIENT = "ambient"
+
+# The file a training run writes, beside the installed model: the candidate.
+CANDIDATE_NAME = "candidate.onnx"
 
 # A training window is 3 s: 28 embeddings, 13 model inputs of 16 embeddings.
 SEQUENCE_SAMPLES = 3 * SAMPLE_RATE
@@ -129,6 +168,28 @@ KIND_NOISE = 3
 
 # A training window gets other speech behind it this often.
 BACKGROUND_SPEECH_CHANCE = 0.25
+
+# One training batch: positives, negatives from the windows, general negatives.
+POSITIVE_BATCH = 256
+NEGATIVE_BATCH = 384
+GENERAL_BATCH = 1536
+# How many of each come from the real recordings, when there are any.
+REAL_POSITIVE_BATCH = POSITIVE_BATCH // 2
+REAL_NEGATIVE_BATCH = NEGATIVE_BATCH // 3
+
+# Windows cut for each real training clip, and for each 3 s of real ambient
+# audio: the first as recorded, the others through the `Augmenter`.
+REAL_VARIANTS = 3
+# Part of the name of the cached real features: raise it when the way they
+# are cut or labelled changes, so an old cache is not taken for a new one.
+REAL_FEATURES_VERSION = 1
+# How long the phrase is taken to be when only its end is known. Erring long
+# is safe: the model inputs that end inside the phrase are ignored, not
+# trained as negatives.
+REAL_PHRASE_SECONDS = 1.0
+# Real windows featurised at a time, so an hour of ambient audio is never
+# held in memory.
+REAL_FEATURE_BATCH = 256
 
 CHECKPOINT_EVERY = 1000
 PROGRESS_EVERY = 250
@@ -860,13 +921,16 @@ class Run:
     hidden: int
     threads: int
     # Leave the windows of `PhraseTable.train_excluded` out of the training.
-    exclude_near: bool = False
+    exclude_near: bool = True
     # Weight of the loss on the hardest 5 % of the hard negatives; 0 drops it.
     hard_topk: float = 1.0
     # Weight of every negative term of the loss.
     negative_weight: float = 1.0
-    # A candidate is written beside the installed model, not over it.
-    candidate: bool = False
+    # The voice dataset's directory; None trains on synthetic clips alone.
+    dataset: Path | None = None
+    # `RealData.manifest` of the recordings the run trains on; empty when
+    # there are none. `train` fills it in once it has read the dataset.
+    real_manifest: str = ""
 
     @property
     def data(self) -> Path:
@@ -878,13 +942,22 @@ class Run:
 
     @property
     def variant(self) -> str:
-        """What tells this run's loss from the first one's; empty for that one."""
+        """What tells this run's training from the first model's; empty for that one.
+
+        The first model was trained on the near homophones, with both loss
+        weights at 1, on synthetic clips alone. A run on real recordings has
+        its own checkpoint (`-real`), so it never overwrites the finished
+        checkpoint of a synthetic-only run; which recordings it was is in the
+        checkpoint's identity (`real_manifest`), not in its name.
+        """
         settings = (self.exclude_near, self.hard_topk, self.negative_weight)
-        if settings == (False, 1.0, 1.0):
-            return ""
-        return (
-            f"-x{int(self.exclude_near)}-k{self.hard_topk:g}-n{self.negative_weight:g}"
+        loss = (
+            ""
+            if settings == (False, 1.0, 1.0)
+            else f"-x{int(self.exclude_near)}-k{self.hard_topk:g}"
+            f"-n{self.negative_weight:g}"
         )
+        return loss + ("-real" if self.real_manifest else "")
 
 
 # What a checkpoint written before these settings existed was trained with.
@@ -892,6 +965,7 @@ CHECKPOINT_DEFAULTS: dict[str, Any] = {
     "excluded": [],
     "hard_topk": 1.0,
     "negative_weight": 1.0,
+    "real_manifest": "",
 }
 
 
@@ -911,7 +985,36 @@ def training_inputs(
     return labels
 
 
-def stage_train(run: Run, shards: Sequence[Shard]) -> Any:
+@dataclass(frozen=True)
+class BatchPlan:
+    """How many inputs of one training batch come from where."""
+
+    positives: int
+    real_positives: int
+    negatives: int
+    real_negatives: int
+
+
+def batch_plan(real_positives: int, real_negatives: int) -> BatchPlan:
+    """The make-up of a batch, given how many real inputs of each kind exist.
+
+    Half of the positives are real when there is any real positive input, and
+    a third of the negatives are real when there is any real negative or
+    ambient input. With neither, the batch is the first model's.
+    """
+    real_positive = REAL_POSITIVE_BATCH if real_positives > 0 else 0
+    real_negative = REAL_NEGATIVE_BATCH if real_negatives > 0 else 0
+    return BatchPlan(
+        POSITIVE_BATCH - real_positive,
+        real_positive,
+        NEGATIVE_BATCH - real_negative,
+        real_negative,
+    )
+
+
+def stage_train(
+    run: Run, shards: Sequence[Shard], real: RealFeatures | None = None
+) -> Any:
     import torch
 
     torch.set_num_threads(run.threads)
@@ -935,6 +1038,7 @@ def stage_train(run: Run, shards: Sequence[Shard]) -> Any:
         "excluded": sorted(table.train_excluded) if run.exclude_near else [],
         "hard_topk": run.hard_topk,
         "negative_weight": run.negative_weight,
+        "real_manifest": run.real_manifest,
     }
     step = 0
     if run.checkpoint.exists():
@@ -964,8 +1068,8 @@ def stage_train(run: Run, shards: Sequence[Shard]) -> Any:
         raise TrainError("no positive training windows: the synthesis made none")
     offsets = np.arange(MODEL_EMBEDDINGS)[np.newaxis, :]
 
-    def gather(windows: Int64, inputs: Int64) -> Any:
-        picked = features[windows[:, np.newaxis], inputs[:, np.newaxis] + offsets]
+    def gather(source: npt.NDArray[np.float16], windows: Int64, inputs: Int64) -> Any:
+        picked = source[windows[:, np.newaxis], inputs[:, np.newaxis] + offsets]
         return torch.from_numpy(picked.astype(np.float32))
 
     log(
@@ -973,23 +1077,54 @@ def stage_train(run: Run, shards: Sequence[Shard]) -> Any:
         f"{len(negative_window)} negative inputs, {acav_rows} general negatives "
         f"({acav_rows * 1.28 / 3600:.0f} h); {run.steps} steps on {run.threads} threads"
     )
+    # The real recordings: their own inputs, drawn beside the synthetic ones.
+    real_features = (
+        real.features
+        if real is not None
+        else np.zeros((0, MODEL_EMBEDDINGS, EMBEDDING_SIZE), dtype=np.float16)
+    )
+    real_meta = real.meta if real is not None else np.zeros((0, 5), dtype=np.int64)
+    real_labels = training_inputs(real_meta, table, run.exclude_near)
+    real_positive_window, real_positive_input = np.nonzero(real_labels == 1)
+    real_negative_window, real_negative_input = np.nonzero(real_labels == 0)
+    plan = batch_plan(len(real_positive_window), len(real_negative_window))
+    if len(real_meta):
+        log(
+            f"train: {len(real_features)} real windows -> {len(real_positive_window)} "
+            f"positive and {len(real_negative_window)} negative inputs; each batch "
+            f"takes {plan.real_positives} of its {POSITIVE_BATCH} positives and "
+            f"{plan.real_negatives} of its {NEGATIVE_BATCH} negatives from them"
+        )
     rng = np.random.default_rng(step + 1)
     loss_of = torch.nn.functional.binary_cross_entropy_with_logits
     started, first_step = time.time(), step
     net.train()
     while step < run.steps:
-        chosen = rng.integers(0, len(positive_window), 256)
-        positives = gather(positive_window[chosen], positive_input[chosen])
-        chosen = rng.integers(0, len(negative_window), 384)
-        negatives = gather(negative_window[chosen], negative_input[chosen])
-        rows = np.sort(rng.integers(0, acav_rows, 1536))
+        # With no real inputs the draws below are the first model's, in its order.
+        chosen = rng.integers(0, len(positive_window), plan.positives)
+        positives = gather(features, positive_window[chosen], positive_input[chosen])
+        if plan.real_positives:
+            chosen = rng.integers(0, len(real_positive_window), plan.real_positives)
+            mixed = gather(
+                real_features, real_positive_window[chosen], real_positive_input[chosen]
+            )
+            positives = torch.cat([positives, mixed])
+        chosen = rng.integers(0, len(negative_window), plan.negatives)
+        negatives = gather(features, negative_window[chosen], negative_input[chosen])
+        if plan.real_negatives:
+            chosen = rng.integers(0, len(real_negative_window), plan.real_negatives)
+            mixed = gather(
+                real_features, real_negative_window[chosen], real_negative_input[chosen]
+            )
+            negatives = torch.cat([negatives, mixed])
+        rows = np.sort(rng.integers(0, acav_rows, GENERAL_BATCH))
         general = torch.from_numpy(acav[rows].astype(np.float32))
-        positive_loss = loss_of(net.logits(positives), torch.ones(256, 1))
+        positive_loss = loss_of(net.logits(positives), torch.ones(POSITIVE_BATCH, 1))
         negative_loss = loss_of(
-            net.logits(negatives), torch.zeros(384, 1), reduction="none"
+            net.logits(negatives), torch.zeros(NEGATIVE_BATCH, 1), reduction="none"
         )[:, 0]
         general_loss = loss_of(
-            net.logits(general), torch.zeros(1536, 1), reduction="none"
+            net.logits(general), torch.zeros(GENERAL_BATCH, 1), reduction="none"
         )[:, 0]
         # Negatives: the mean, plus the mean of the hardest 5 %, which keeps
         # the pressure on the rare false accept. With both weights at 1 this
@@ -1036,7 +1171,624 @@ def stage_train(run: Run, shards: Sequence[Shard]) -> Any:
     return net
 
 
-# --- stages 4 and 5: evaluation, export and install ---------------------------
+# --- the real recordings -----------------------------------------------------
+
+# One word of a local transcript: (text, start, end), the times in seconds.
+type Word = tuple[str, float, float]
+# Finds where the phrase is said in a clip, as (start, end) seconds, or None:
+# faster-whisper's word timestamps (`whisper_locator`), or a test fake.
+type Locator = Callable[[Int16, ClipRecord], tuple[float, float] | None]
+
+
+@dataclass(frozen=True)
+class RealClip:
+    """One clip of the voice dataset, with its side of the split."""
+
+    record: ClipRecord
+    # `SPLIT_TRAIN` or `SPLIT_HELDOUT` for a positive or a negative;
+    # `SPLIT_AMBIENT` for an ambient recording, which is on both sides.
+    split: str
+    # The clip's length in samples.
+    samples: int
+    # For an ambient recording: its training and its held-out samples, as
+    # (first, one past the last). They never overlap.
+    train: tuple[int, int] = (0, 0)
+    heldout: tuple[int, int] = (0, 0)
+
+
+@dataclass(frozen=True)
+class RealData:
+    """The voice dataset's clips for one phrase, split as `dataset` splits them."""
+
+    phrase: str
+    # In a fixed order: by file name.
+    clips: tuple[RealClip, ...]
+    # A sha1 over every clip's manifest line and length; empty with no clips.
+    # It names the cached features and is part of a checkpoint's identity.
+    manifest: str
+
+    def files(self, side: str, label: str | None = None) -> list[str]:
+        """The file names on one side of the split, of one label or of all."""
+        return [
+            clip.record.file
+            for clip in self.clips
+            if clip.split == side and label in (None, clip.record.label)
+        ]
+
+    @property
+    def ambient(self) -> list[RealClip]:
+        return [clip for clip in self.clips if clip.split == SPLIT_AMBIENT]
+
+    @property
+    def heldout_ambient_minutes(self) -> float:
+        held = sum(clip.heldout[1] - clip.heldout[0] for clip in self.ambient)
+        return held / SAMPLE_RATE / 60
+
+    @property
+    def trained_ambient_minutes(self) -> float:
+        trained = sum(clip.train[1] - clip.train[0] for clip in self.ambient)
+        return trained / SAMPLE_RATE / 60
+
+    def excluded(self, table: PhraseTable, exclude_near: bool) -> list[str]:
+        """The training-side negatives a run with `exclude_near` leaves out.
+
+        They are recordings of `PhraseTable.train_excluded`: the owner saying
+        a phrase that sounds the same as the wake phrase. Like the synthetic
+        clips of those phrases, they are not trained on as negatives.
+        """
+        if not exclude_near:
+            return []
+        return [
+            clip.record.file
+            for clip in self.clips
+            if clip.split == SPLIT_TRAIN
+            and clip.record.label == LABEL_NEGATIVE
+            and spoken_text(clip.record.prompt) in table.train_excluded
+        ]
+
+    def describe(self, table: PhraseTable, exclude_near: bool) -> list[str]:
+        """The log lines that say what the run has of real recordings."""
+        if not self.clips:
+            return [
+                f"real: no real recordings for {self.phrase!r}: synthetic clips only"
+            ]
+        excluded = self.excluded(table, exclude_near)
+        trained = len(self.files(SPLIT_TRAIN)) - len(excluded)
+        positives = len(self.files(SPLIT_TRAIN, LABEL_POSITIVE))
+        negatives = len(self.files(SPLIT_TRAIN, LABEL_NEGATIVE)) - len(excluded)
+        summary = (
+            f"real: {trained} training clips, {len(self.files(SPLIT_HELDOUT))} held "
+            f"out, {self.heldout_ambient_minutes:.1f} min held-out ambient"
+        )
+        detail = (
+            f"real: trained on {positives} positives, {negatives} negatives and "
+            f"{self.trained_ambient_minutes:.1f} min of ambient; held out "
+            f"{len(self.files(SPLIT_HELDOUT, LABEL_POSITIVE))} positives and "
+            f"{len(self.files(SPLIT_HELDOUT, LABEL_NEGATIVE))} negatives"
+        )
+        lines = [summary, detail]
+        if excluded:
+            lines.append(
+                f"real: left out {len(excluded)} negatives that sound the same as "
+                "the phrase"
+            )
+        return lines
+
+
+def spoken_text(text: str) -> str:
+    """A prompt as its words: lower case, no punctuation, single spaces."""
+    kept = "".join(c if c.isalnum() or c == "'" else " " for c in text.lower())
+    return " ".join(kept.split())
+
+
+def _letters(text: str) -> str:
+    return "".join(c for c in text.lower() if c.isalnum())
+
+
+def phrase_last(record: ClipRecord) -> bool:
+    """Whether a clip's script prompt ends with the phrase.
+
+    Read from the manifest alone: the prompt's text, without spaces or
+    punctuation, ends with the phrase's. A clip with no script prompt (a
+    live-monitor mark, an Audio-screen clip) is not known to end with it.
+    """
+    return bool(record.prompt_id) and _letters(record.prompt).endswith(
+        _letters(record.phrase)
+    )
+
+
+def _wav_samples(path: Path) -> int:
+    """A dataset clip's length in samples; `TrainError` unless 16 kHz mono 16-bit."""
+    try:
+        with wave.open(str(path), "rb") as wav:
+            shape = (wav.getframerate(), wav.getnchannels(), wav.getsampwidth())
+            frames = wav.getnframes()
+    except (OSError, EOFError, wave.Error):
+        raise TrainError(f"cannot read {path} as a WAV file") from None
+    if shape != (SAMPLE_RATE, 1, 2):
+        raise TrainError(f"{path} is not a {SAMPLE_RATE} Hz mono 16-bit WAV file")
+    return frames
+
+
+def read_samples(path: Path, first: int, count: int) -> Int16:
+    """`count` samples of a WAV file from sample `first`: a part, not the whole."""
+    try:
+        with wave.open(str(path), "rb") as wav:
+            wav.setpos(max(0, min(first, wav.getnframes())))
+            frames = wav.readframes(max(0, count))
+    except (OSError, EOFError, wave.Error):
+        raise TrainError(f"cannot read {path} as a WAV file") from None
+    return np.frombuffer(frames, dtype="<i2").astype(np.int16)
+
+
+def load_real(dataset: VoiceDataset, phrase: str) -> RealData:
+    """The manifest's clips for `phrase`, in a fixed order, each with its split.
+
+    The split is `autobot.wakeword.dataset`'s and nothing else: `split` for a
+    positive or a negative, `ambient_slices` for an ambient recording, whose
+    training and held-out sample ranges meet at one sample and never overlap.
+    """
+    clips: list[RealClip] = []
+    identity: list[object] = [REAL_FEATURES_VERSION]
+    for record in sorted(dataset.for_phrase(phrase), key=lambda record: record.file):
+        samples = _wav_samples(dataset.path(record))
+        if record.label == LABEL_AMBIENT:
+            (_, cut_seconds), _held = ambient_slices(record, samples / SAMPLE_RATE)
+            cut = min(samples, round(cut_seconds * SAMPLE_RATE))
+            clips.append(
+                RealClip(record, SPLIT_AMBIENT, samples, (0, cut), (cut, samples))
+            )
+        else:
+            side = SPLIT_HELDOUT if split(record) == HELDOUT else SPLIT_TRAIN
+            clips.append(RealClip(record, side, samples))
+        identity.append([asdict(record), samples])
+    if not clips:
+        return RealData(phrase, (), "")
+    digest = hashlib.sha1(
+        json.dumps(identity, sort_keys=True).encode(), usedforsecurity=False
+    )
+    return RealData(phrase, tuple(clips), digest.hexdigest())
+
+
+def real_section(
+    real: RealData, table: PhraseTable, exclude_near: bool
+) -> dict[str, Any]:
+    """The `real` part of the metrics file: what was trained on and what held out."""
+    excluded = real.excluded(table, exclude_near)
+    trained = [file for file in real.files(SPLIT_TRAIN) if file not in excluded]
+
+    def seconds(clip: RealClip, part: tuple[int, int]) -> dict[str, Any]:
+        return {
+            "file": clip.record.file,
+            "start": part[0] / SAMPLE_RATE,
+            "end": part[1] / SAMPLE_RATE,
+        }
+
+    section: dict[str, Any] = {
+        "trained": trained,
+        "heldout": real.files(SPLIT_HELDOUT),
+        # Training-side recordings of phrases that sound the same as the wake
+        # phrase: neither trained on nor held out (`--exclude-near-homophones`).
+        "excluded": excluded,
+        "ambient_trained": [seconds(clip, clip.train) for clip in real.ambient],
+        "ambient_heldout": [seconds(clip, clip.heldout) for clip in real.ambient],
+        "counts": {
+            "trained_positives": len(real.files(SPLIT_TRAIN, LABEL_POSITIVE)),
+            "trained_negatives": len(real.files(SPLIT_TRAIN, LABEL_NEGATIVE))
+            - len(excluded),
+            "excluded_negatives": len(excluded),
+            "heldout_positives": len(real.files(SPLIT_HELDOUT, LABEL_POSITIVE)),
+            "heldout_negatives": len(real.files(SPLIT_HELDOUT, LABEL_NEGATIVE)),
+            "ambient_clips": len(real.ambient),
+            "ambient_trained_minutes": real.trained_ambient_minutes,
+            "ambient_heldout_minutes": real.heldout_ambient_minutes,
+        },
+        "manifest": real.manifest,
+    }
+    if not real.clips:
+        section["note"] = "no real recordings: synthetic clips only"
+    return section
+
+
+def voiced_span(samples: Int16) -> tuple[int, int]:
+    """Where the speech of a clip starts and ends, in samples.
+
+    Energy in 20 ms frames against the clip's own noise floor (its quietest
+    tenth). Bursts closer than 200 ms are one stretch, so the pause before a
+    final consonant does not end it, and a stretch with under 60 ms above the
+    floor (a click) is not speech. A clip with nothing above its floor is
+    taken whole.
+    """
+    frame = SAMPLE_RATE // 50
+    count = len(samples) // frame
+    if count < 3:
+        return 0, len(samples)
+    framed = samples[: count * frame].astype(np.float64).reshape(count, frame)
+    level = 20 * np.log10(np.sqrt((framed**2).mean(axis=1)) + 1.0)
+    floor = float(np.percentile(level, 10))
+    peak = float(level.max())
+    if peak - floor < 8.0:
+        return 0, len(samples)
+    loud = np.flatnonzero(level > floor + max(8.0, 0.3 * (peak - floor)))
+    stretches = np.split(loud, np.flatnonzero(np.diff(loud) > 10) + 1)
+    speech = [stretch for stretch in stretches if len(stretch) >= 3]
+    if not speech:
+        speech = [max(stretches, key=len)]
+    return int(speech[0][0]) * frame, (int(speech[-1][-1]) + 1) * frame
+
+
+def find_phrase(
+    words: Sequence[Word], phrase: str, prompt: str = "", *, spelled_only: bool = False
+) -> tuple[float, float] | None:
+    """Where `phrase` is said among transcribed `words`: (start, end) seconds.
+
+    The transcript is used to find the phrase, never to label the clip: the
+    label is the prompt's. In order: one to three words in a row that spell
+    the phrase; the run of words that spells something closest to it, when
+    it is close; and, when the phrase itself was misheard, the word the
+    prompt has after it, which the phrase ends just before (skipped with
+    `spelled_only`). None when none applies.
+    """
+    wanted = _letters(phrase)
+    spoken = [(_letters(text), start, end) for text, start, end in words]
+    spoken = [word for word in spoken if word[0]]
+    if not wanted or not spoken:
+        return None
+    best: tuple[float, float, float] | None = None
+    for first in range(len(spoken)):
+        for last in range(first, min(first + 3, len(spoken))):
+            said = "".join(word[0] for word in spoken[first : last + 1])
+            span = (spoken[first][1], spoken[last][2])
+            if said == wanted:
+                return span
+            likeness = difflib.SequenceMatcher(None, said, wanted).ratio()
+            if best is None or likeness > best[0]:
+                best = (likeness, *span)
+    if best is not None and best[0] >= 0.6:
+        return best[1], best[2]
+    if spelled_only:
+        return None
+    prompted = [_letters(word) for word in spoken_text(prompt).split()]
+    size = len(spoken_text(phrase).split())
+    for first in range(len(prompted) - size):
+        if "".join(prompted[first : first + size]) != wanted:
+            continue
+        following = prompted[first + size]
+        for text, start, _end in spoken[1:]:
+            if text == following:
+                return max(0.0, start - REAL_PHRASE_SECONDS), start
+    return None
+
+
+def whisper_locator(models: Path, phrase: str, threads: int) -> Locator:
+    """faster-whisper `tiny.en` word timestamps, from the local model directory.
+
+    Local like every other speech model (CONSTRAINTS.md CN-1): the directory
+    under `models/` is loaded with `local_files_only`, and a missing one is a
+    `TrainError`, never a download. A clip is transcribed plainly first and,
+    when the phrase is not spelled in that, once more with the phrase given
+    as the text before it, which makes the model more likely to spell it;
+    only then is the word after the phrase used to place it.
+    """
+    directory = models / FASTER_WHISPER_MODEL_DIR.relative_to(MODELS_DIR)
+    if not (directory / "model.bin").is_file():
+        raise TrainError(f"faster-whisper model is missing: {directory}")
+    enforce_offline()
+    from faster_whisper import WhisperModel
+
+    model: Any = WhisperModel(
+        str(directory),
+        device="cpu",
+        compute_type="int8",
+        cpu_threads=threads,
+        local_files_only=True,
+    )
+
+    def words(samples: Int16, before: str | None) -> list[Word]:
+        segments, _info = model.transcribe(
+            samples.astype(np.float32) / 32768,
+            language="en",
+            beam_size=5,
+            temperature=0.0,
+            condition_on_previous_text=False,
+            word_timestamps=True,
+            vad_filter=False,
+            initial_prompt=before,
+        )
+        return [
+            (str(word.word), float(word.start), float(word.end))
+            for segment in segments
+            for word in (segment.words or [])
+        ]
+
+    def locate(samples: Int16, record: ClipRecord) -> tuple[float, float] | None:
+        plain = words(samples, None)
+        for heard in (plain, words(samples, f"{phrase.capitalize()}.")):
+            found = find_phrase(heard, record.phrase, spelled_only=True)
+            if found is not None:
+                return found
+        return find_phrase(plain, record.phrase, record.prompt)
+
+    return locate
+
+
+def key_span(
+    samples: Int16, record: ClipRecord, locate: Locator | None
+) -> tuple[int, int, str]:
+    """Where the phrase is in a real positive: (start, end) samples, and how found.
+
+    A prompt that ends with the phrase: the phrase ends where the speech does
+    (`"span"`). Any other positive: the local transcript's word times, kept
+    inside the speech (`"words"`), and the end of the speech when the phrase
+    is not found in them or there is no transcriber (`"fallback"`). The
+    start is only ever moved earlier, never later, than what was found: the
+    model inputs that end inside the phrase are ignored, so a phrase taken
+    too long costs nothing and one taken too short trains its first half as
+    a negative.
+    """
+    voiced_start, voiced_end = voiced_span(samples)
+    longest = int(REAL_PHRASE_SECONDS * SAMPLE_RATE)
+    by_span = (max(voiced_start, voiced_end - longest), voiced_end)
+    if phrase_last(record):
+        return (*by_span, "span")
+    if locate is not None:
+        found = locate(samples, record)
+        if found is not None:
+            end = min(voiced_end, round(found[1] * SAMPLE_RATE))
+            start = min(round(found[0] * SAMPLE_RATE), end - longest // 2)
+            start = max(voiced_start, start)
+            if end > start:
+                return start, end, "words"
+    return (*by_span, "fallback")
+
+
+@dataclass(frozen=True)
+class RealWindow:
+    """One 3 s training window cut from a real clip."""
+
+    # The clip's position in `RealData.clips`.
+    clip: int
+    kind: int
+    # The position in `PhraseTable.hard` of what a negative says, or -1.
+    hard_id: int
+    # The window is samples [end - SEQUENCE_SAMPLES, end) of the clip; outside
+    # the clip it is quiet.
+    end: int
+    # Where the phrase starts and ends in the window, in samples, or -1.
+    key_start: int = -1
+    key_end: int = -1
+    # False for the window as recorded, True for one through the `Augmenter`.
+    augment: bool = False
+
+    @property
+    def start(self) -> int:
+        return self.end - SEQUENCE_SAMPLES
+
+
+def plan_real_windows(
+    real: RealData,
+    table: PhraseTable,
+    spans: Mapping[str, tuple[int, int]],
+    rng: np.random.Generator,
+) -> list[RealWindow]:
+    """Every training window of the real recordings. Deterministic for an `rng`.
+
+    `spans` gives, by file name, where the phrase is in each training
+    positive. Held-out clips get no window, and an ambient recording's
+    windows tile its training samples only: none reaches its held-out last
+    fifth.
+    """
+    windows: list[RealWindow] = []
+    hard_ids = {text: index for index, text in reversed(list(enumerate(table.hard)))}
+    for index, clip in enumerate(real.clips):
+        label = clip.record.label
+        if clip.split == SPLIT_AMBIENT:
+            first, last = clip.train
+            for start in range(first, last - SEQUENCE_SAMPLES + 1, SEQUENCE_SAMPLES):
+                for variant in range(REAL_VARIANTS):
+                    windows.append(
+                        RealWindow(
+                            index,
+                            KIND_NOISE,
+                            -1,
+                            start + SEQUENCE_SAMPLES,
+                            augment=variant > 0,
+                        )
+                    )
+        elif clip.split != SPLIT_TRAIN:
+            continue
+        elif label == LABEL_POSITIVE:
+            key_start, key_end = spans[clip.record.file]
+            for variant in range(REAL_VARIANTS):
+                # The phrase ends 1.3 to 2.9 s into the 3 s window.
+                window_end = int(rng.uniform(1.3, 2.9) * SAMPLE_RATE)
+                windows.append(
+                    RealWindow(
+                        index,
+                        KIND_POSITIVE,
+                        -1,
+                        key_end + SEQUENCE_SAMPLES - window_end,
+                        window_end - (key_end - key_start),
+                        window_end,
+                        augment=variant > 0,
+                    )
+                )
+        else:
+            hard_id = hard_ids.get(spoken_text(clip.record.prompt), -1)
+            kind = KIND_HARD if hard_id >= 0 else KIND_GENERIC
+            for variant in range(REAL_VARIANTS):
+                low = min(SAMPLE_RATE, clip.samples)
+                end = int(rng.uniform(low, clip.samples + 0.5 * SAMPLE_RATE))
+                windows.append(
+                    RealWindow(index, kind, hard_id, end, augment=variant > 0)
+                )
+    return windows
+
+
+def as_recorded(rng: np.random.Generator, clip: Int16, end: int) -> Int16:
+    """The window ending at sample `end` of `clip`, unaugmented.
+
+    Where the window reaches outside the clip it holds the near-silence the
+    engine primes itself with, not digital zero: that is what the listener
+    hears before a stretch of speech.
+    """
+    start = end - SEQUENCE_SAMPLES
+    window = rng.normal(0.0, PRIME_NOISE_LEVEL, SEQUENCE_SAMPLES)
+    low, high = max(0, start), min(len(clip), end)
+    if high > low:
+        window[low - start : high - start] = clip[low:high]
+    return np.clip(window, -32768, 32767).astype(np.int16)
+
+
+@dataclass(frozen=True)
+class RealFeatures:
+    """The featurised real training windows, as `feats_shard` stores a shard's."""
+
+    # [windows, 28, 96]
+    features: npt.NDArray[np.float16]
+    # [windows, 5]: (kind, hard-negative id, clip index, key start, key end).
+    meta: Int64
+    # [windows, 3]: (clip index, first sample, one past the last sample) of
+    # the window in its clip.
+    source: Int64
+    # The clips' file names, by clip index.
+    files: tuple[str, ...]
+
+
+def no_real_features() -> RealFeatures:
+    return RealFeatures(
+        np.zeros(
+            (0, SEQUENCE_INPUTS + MODEL_EMBEDDINGS - 1, EMBEDDING_SIZE), np.float16
+        ),
+        np.zeros((0, 5), dtype=np.int64),
+        np.zeros((0, 3), dtype=np.int64),
+        (),
+    )
+
+
+def real_feats_path(run: Run, real: RealData) -> Path:
+    return run.work / "real" / f"{real.manifest}.npz"
+
+
+def real_feats(
+    run: Run, real: RealData, locator: Callable[[], Locator] | None = None
+) -> RealFeatures:
+    """Cut, augment and featurise the training side of the real recordings.
+
+    Cached as `work/real/<manifest-sha1>.npz`; the caches of earlier
+    manifests are removed, since the dataset only grows. Speech clips are
+    read whole; an ambient recording is read 3 s at a time and the windows
+    are featurised `REAL_FEATURE_BATCH` at a time, so an hour of room audio
+    needs no more memory than a minute. `locator` builds the transcriber for
+    the positives whose prompt does not end with the phrase; the default is
+    `whisper_locator`, and it is built only when such a clip exists.
+    """
+    if not real.clips or run.dataset is None:
+        return no_real_features()
+    out = real_feats_path(run, real)
+    files = tuple(clip.record.file for clip in real.clips)
+    if out.exists():
+        stored = np.load(out)
+        log(f"real: {len(stored['X'])} windows cached in {out.name}")
+        return RealFeatures(stored["X"], stored["meta"], stored["source"], files)
+    dataset = VoiceDataset(run.dataset)
+    table = phrase_table(run.phrase)
+    rng = np.random.default_rng(seed_of("real" + real.manifest))
+
+    spans: dict[str, tuple[int, int]] = {}
+    found = {"span": 0, "words": 0, "fallback": 0}
+    locate: Locator | None = None
+    tried = False
+    for clip in real.clips:
+        if clip.split != SPLIT_TRAIN or clip.record.label != LABEL_POSITIVE:
+            continue
+        if not phrase_last(clip.record) and not tried:
+            tried = True
+            try:
+                locate = (
+                    locator()
+                    if locator is not None
+                    else whisper_locator(run.models, run.phrase, run.threads)
+                )
+            except (TrainError, ModuleNotFoundError) as error:
+                log(
+                    f"real: no local transcriber ({error}); the phrase is taken to "
+                    "end where the speech ends"
+                )
+        samples = dataset.load(clip.record).samples
+        start, end, how = key_span(samples, clip.record, locate)
+        spans[clip.record.file] = (start, end)
+        found[how] += 1
+        if how == "fallback":
+            log(
+                f"real: {clip.record.file}: the phrase was not found in the "
+                "transcript; taken to end where the speech ends"
+            )
+    windows = plan_real_windows(real, table, spans, rng)
+    build_banks(run.data, run.work)
+    augment = Augmenter(run.work, SPLIT_TRAIN)
+    features: list[npt.NDArray[np.float16]] = []
+    batch: list[Int16] = []
+    loaded: tuple[int, Int16] | None = None
+    started = time.time()
+    for number, window in enumerate(windows, start=1):
+        clip = real.clips[window.clip]
+        path = dataset.path(clip.record)
+        if clip.split == SPLIT_AMBIENT:
+            # Only the window's own 3 s are read: `end` is its end in the piece.
+            audio = read_samples(path, window.start, SEQUENCE_SAMPLES)
+            end = SEQUENCE_SAMPLES
+        else:
+            if loaded is None or loaded[0] != window.clip:
+                loaded = (window.clip, dataset.load(clip.record).samples)
+            audio, end = loaded[1], window.end
+        if window.augment:
+            batch.append(augment(rng, place(audio, end, SEQUENCE_SAMPLES)))
+        else:
+            batch.append(as_recorded(rng, audio, end))
+        if len(batch) == REAL_FEATURE_BATCH or number == len(windows):
+            features.append(_features(np.stack(batch)))
+            batch = []
+            log(
+                f"real: featurised {number}/{len(windows)} windows, eta "
+                f"{eta_minutes(started, number, len(windows), time.time()):.1f} min"
+            )
+    made = no_real_features()
+    result = RealFeatures(
+        np.concatenate(features) if features else made.features,
+        np.array(
+            [(w.kind, w.hard_id, w.clip, w.key_start, w.key_end) for w in windows],
+            dtype=np.int64,
+        ).reshape(-1, 5),
+        np.array([(w.clip, w.start, w.end) for w in windows], dtype=np.int64).reshape(
+            -1, 3
+        ),
+        files,
+    )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    for stale in out.parent.glob("*.npz"):
+        stale.unlink()
+    save_npz(
+        out,
+        X=result.features,
+        meta=result.meta,
+        source=result.source,
+        files=np.array(files),
+    )
+    log(
+        f"real: {len(windows)} windows from the training recordings; the phrase "
+        f"ends with the speech in {found['span']} positives, was located by word "
+        f"timestamps in {found['words']} and not found in {found['fallback']}"
+    )
+    return result
+
+
+def stage_real(run: Run, real: RealData) -> RealFeatures:
+    """The `real` stage: the features of the real training windows, cached."""
+    return real_feats(run, real)
+
+
+# --- evaluation and export ---------------------------------------------------
 
 
 def recommend(rows: Sequence[dict[str, float]]) -> dict[str, float]:
@@ -1059,7 +1811,19 @@ def recommend(rows: Sequence[dict[str, float]]) -> dict[str, float]:
     return max(usable or rows, key=lambda row: row["threshold"])
 
 
-def stage_eval(run: Run, shards: Sequence[Shard], net: Any) -> dict[str, Any]:
+def stage_eval(
+    run: Run,
+    shards: Sequence[Shard],
+    net: Any,
+    model: Path | None = None,
+    real: RealData | None = None,
+) -> dict[str, Any]:
+    """The metrics file's contents: the synthetic figures, then the real ones.
+
+    `model` is the exported ONNX file, which is what the real recordings are
+    scored with; without it, or without `real`, only the synthetic figures
+    are made.
+    """
     table = phrase_table(run.phrase)
     features, meta = load_features(run.work, shards, SPLIT_HELDOUT)
     peaks = clip_scores(net, features)
@@ -1143,13 +1907,37 @@ def stage_eval(run: Run, shards: Sequence[Shard], net: Any) -> dict[str, Any]:
             "train with more data)"
         )
     )
+    real = real if real is not None else RealData(run.phrase, (), "")
+    real_metrics = real_section(real, table, run.exclude_near)
+    recommended, recommended_on = best["threshold"], "synthetic"
+    if model is not None and real.clips and run.dataset is not None:
+        # The exported file, with the runtime's libraries: what will run.
+        from autobot.wakeword import evaluate
+
+        scores = evaluate.score_real(model, VoiceDataset(run.dataset), run.phrase)
+        for line in evaluate.format_sweep(scores):
+            log(f"eval: real: {line}")
+        real_metrics.update(scores.to_json())
+        if scores.recommended is not None and scores.heldout_positives > 0:
+            recommended, recommended_on = scores.recommended["threshold"], "real"
+        else:
+            log(
+                "eval: real: no held-out real positive to recommend a threshold on; "
+                "the synthetic recommendation stands"
+            )
+    at_recommended = next(row for row in rows if row["threshold"] == recommended)
     return {
         "phrase": run.phrase,
         "input": "[N,16,96] float32 openWakeWord embeddings",
         "output": "[N,1] score 0..1",
-        "recommended_threshold": best["threshold"],
+        "recommended_threshold": recommended,
+        # Which figures the threshold was chosen on: "real" or "synthetic".
+        "recommended_on": recommended_on,
+        "synthetic_recommended_threshold": best["threshold"],
         "meets_false_accept_target": meets,
-        "metrics_at_threshold": best,
+        # The synthetic figures at the recommended threshold.
+        "metrics_at_threshold": at_recommended,
+        "real": real_metrics,
         "sweep": rows,
         "worst_hard_negatives": [
             {"text": text, "false_accept_rate": rate, "clips": count}
@@ -1288,25 +2076,16 @@ def export_onnx(net: Any, path: Path) -> float:
     return float(np.abs(session.run(None, {"x": sample})[0] - expected).max())
 
 
-def previous_path(path: Path) -> Path:
-    """Where the file `path` replaces is kept: `autobot.onnx` -> `autobot.prev.onnx`."""
-    return path.with_name(f"{path.stem}.prev{path.suffix}")
+def write_candidate(
+    temporary_model: Path, metrics: dict[str, Any], output: Path
+) -> None:
+    """Move the exported model and its metrics to `output` and its `.json`.
 
-
-def install(temporary_model: Path, metrics: dict[str, Any], output: Path) -> None:
-    """Move the new model and its metrics into place, keeping the old ones.
-
-    Every step is a copy to a temporary name and an `os.replace`, so the
-    model file is whole at every moment: a listener starting meanwhile loads
-    the old model or the new one, never half of either.
+    Each is written under a temporary name and moved with `os.replace`, so a
+    reader never sees half a file. An earlier candidate of the same name is
+    replaced: there is one candidate at a time. Nothing else is touched.
     """
     metrics_path = output.with_suffix(".json")
-    for current in (output, metrics_path):
-        if current.exists():
-            kept = previous_path(current)
-            copying = kept.with_name(kept.name + ".tmp")
-            shutil.copy2(current, copying)
-            os.replace(copying, kept)
     writing = metrics_path.with_name(metrics_path.name + ".tmp")
     writing.write_text(json.dumps(metrics, indent=1) + "\n", encoding="utf-8")
     os.replace(temporary_model, output)
@@ -1379,6 +2158,10 @@ def train(run: Run, stage: str) -> None:
     shards = plan_shards(run.scale)
     started = time.time()
     table = phrase_table(run.phrase)
+    real = RealData(run.phrase, (), "")
+    if run.dataset is not None:
+        real = load_real(VoiceDataset(run.dataset), run.phrase)
+    run = replace(run, real_manifest=real.manifest)
     log(
         f"training the wake-word model for {run.phrase!r}: scale {run.scale:g} "
         f"({len(shards)} shards), {run.steps} steps, {run.threads} threads; "
@@ -1391,6 +2174,8 @@ def train(run: Run, stage: str) -> None:
         + f"; hard top-k weight {run.hard_topk:g}, negative weight "
         f"{run.negative_weight:g}; work in {run.work}"
     )
+    for line in real.describe(table, run.exclude_near):
+        log(line)
     stage_synth(run, shards)
     if stage == "synth":
         return
@@ -1398,7 +2183,10 @@ def train(run: Run, stage: str) -> None:
     if stage == "feats":
         return
     check_assets(run, [])
-    net = stage_train(run, shards)
+    real_features = stage_real(run, real)
+    if stage == "real":
+        return
+    net = stage_train(run, shards, real_features)
     run.output.parent.mkdir(parents=True, exist_ok=True)
     temporary = run.output.with_name(run.output.name + ".tmp")
     difference = export_onnx(net, temporary)
@@ -1407,28 +2195,24 @@ def train(run: Run, stage: str) -> None:
         raise TrainError(
             f"the exported model differs from the trained one by {difference:.1e}"
         )
-    metrics = stage_eval(run, shards, net)
-    replaced = run.output.exists()
-    install(temporary, metrics, run.output)
+    try:
+        metrics = stage_eval(run, shards, net, temporary, real)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    write_candidate(temporary, metrics, run.output)
     log(
         f"export: wrote {run.output} ({run.output.stat().st_size // 1024} kB; "
-        f"ONNX against the network: {difference:.1e})"
-        + (
-            f"; the model it replaced is kept as {previous_path(run.output).name}"
-            if replaced
-            else ""
-        )
+        f"ONNX against the network: {difference:.1e}) and "
+        f"{run.output.with_suffix('.json').name}; recommended threshold "
+        f"{metrics['recommended_threshold']}, chosen on the "
+        f"{metrics['recommended_on']} figures"
     )
-    if run.candidate:
-        log(
-            f"done in {(time.time() - started) / 60:.1f} min. {run.output.name} is a "
-            "candidate: the installed model and the configuration are unchanged."
-        )
-        return
     log(
-        f"done in {(time.time() - started) / 60:.1f} min. Set threshold = "
-        f"{metrics['recommended_threshold']} for {run.phrase!r} in "
-        "config/autobot.toml and restart the listener ('make down; make up')."
+        f"done in {(time.time() - started) / 60:.1f} min. {run.output.name} is a "
+        "candidate, ready for the interface: 'make deploy' compares it with the "
+        "installed model and installs it. The installed model and the "
+        "configuration are unchanged."
     )
 
 
@@ -1446,8 +2230,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--output",
         type=Path,
         default=None,
-        help="the .onnx file to write (default: the phrase's 'model' in the "
-        "configuration, else models/wakeword/<phrase>.onnx)",
+        help="the .onnx file to write (default: models/wakeword/candidate.onnx, "
+        "the candidate the interface installs)",
     )
     parser.add_argument(
         "--scale",
@@ -1461,9 +2245,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--exclude-near-homophones",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help="leave the hard negatives that sound the same as the phrase out of "
-        "the training (they are still evaluated, on their own)",
+        "the training (they are still evaluated, on their own); the default, "
+        "--no-exclude-near-homophones trains on them",
     )
     parser.add_argument(
         "--hard-topk-weight",
@@ -1480,8 +2265,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--name",
         default=None,
-        help="train a candidate: write candidates/<name>.onnx beside the model "
-        "file and leave the installed model alone",
+        help="an experiment: write candidates/<name>.onnx instead of "
+        "candidate.onnx (the interface installs only candidate.onnx)",
+    )
+    parser.add_argument(
+        "--dataset",
+        type=Path,
+        default=None,
+        help="the voice dataset's directory (default: data/voice in the checkout)",
     )
     parser.add_argument(
         "--work", type=Path, default=None, help="where the stages cache their work"
@@ -1489,7 +2280,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--stage",
         default="all",
-        choices=["all", "synth", "feats"],
+        choices=["all", "synth", "feats", "real"],
         help="stop after this stage (default: run everything)",
     )
     return parser
@@ -1499,13 +2290,9 @@ def resolve_run(args: argparse.Namespace) -> Run:
     """The run's settings, from the arguments and the configuration."""
     config = load_config()
     phrase = args.phrase or config.wake_phrases[0].phrase
-    output: Path | None = args.output
-    if output is None:
-        for entry in config.wake_phrases:
-            if entry.phrase.lower() == phrase.lower() and entry.model_path is not None:
-                output = entry.model_path
-        if output is None:
-            output = resolve_repo_path(WAKEWORD_MODELS_DIR / f"{slug(phrase)}.onnx")
+    output: Path = args.output or resolve_repo_path(
+        WAKEWORD_MODELS_DIR / CANDIDATE_NAME
+    )
     if output.suffix != ".onnx":
         raise TrainError(f"the model file must end in .onnx, not {output.name!r}")
     if args.steps < 1 or args.hidden < 1 or args.threads < 1:
@@ -1535,7 +2322,7 @@ def resolve_run(args: argparse.Namespace) -> Run:
         exclude_near=args.exclude_near_homophones,
         hard_topk=args.hard_topk_weight,
         negative_weight=args.negative_weight,
-        candidate=args.name is not None,
+        dataset=(args.dataset or resolve_repo_path(VOICE_DIR)).resolve(),
     )
 
 
@@ -1545,7 +2332,7 @@ def main(argv: list[str] | None = None) -> int:
     enforce_offline()
     try:
         train(resolve_run(args), args.stage)
-    except (ConfigError, TrainError) as error:
+    except (ConfigError, DatasetError, TrainError) as error:
         print(error, file=sys.stderr, flush=True)
         return 2
     except ModuleNotFoundError as error:

@@ -19,6 +19,9 @@ provenance:
   - written: schiele/gameon1-bring-up-run
     at: 2026-11-28T00:38:00Z
     mode: revise
+  - written: schiele/server-reached-from-the-nuc
+    at: 2026-11-28T00:44:38Z
+    mode: revise
 ---
 
 # autobot — Infrastructure
@@ -46,7 +49,7 @@ This document records the environments and accounts autobot runs in and talks to
 
 ### GPU inference server: `GAMEON1` (Windows 11 PC, Ubuntu in WSL2)
 
-The owner's Windows PC, added on 2026-11-27 to be autobot's GPU inference server on the LAN. Its planned role is to serve speech-to-text, a local language model for routing and for the core conversational agent, and possibly text-to-speech, to the NUC over the LAN. The NUC stays the front end. The server's behaviour is specified in `docs/specs/active/autobot-gpu-inference-server-SPEC.md` (IS-1 to IS-14). The server's code is in the repository (`server/`, and `make server-*`), built on the NUC on fakes. **Since 2026-11-27 the server runs on this host**, as the systemd user unit `autobot-server.service`, on port 8300, with speech-to-text, routing and chat all ready ("The server as it runs" below). The NUC has not called it yet: no firewall rule, start-up task or address reservation is known to have been made, so the port is not known to be open to the LAN. "Setting the server up" below is the order it was done in. The hardware and Windows facts below were read from the machine on 2026-11-27 from inside WSL (`wsl.exe --version`, `nvidia-smi`, `lscpu`, `free`, `df`, `ip`, and read-only PowerShell `Get-*` and `powercfg` queries); nothing on the Windows side was changed.
+The owner's Windows PC, added on 2026-11-27 to be autobot's GPU inference server on the LAN. Its planned role is to serve speech-to-text, a local language model for routing and for the core conversational agent, and possibly text-to-speech, to the NUC over the LAN. The NUC stays the front end. The server's behaviour is specified in `docs/specs/active/autobot-gpu-inference-server-SPEC.md` (IS-1 to IS-14). The server's code is in the repository (`server/`, and `make server-*`), built on the NUC on fakes. **Since 2026-11-27 the server runs on this host**, as the systemd user unit `autobot-server.service`, on port 8300, with speech-to-text, routing and chat all ready ("The server as it runs" below). The NUC reaches it: on 2026-11-28, after the owner made the firewall rules and entered the token on the NUC, `make server-ping` there read `up`, contract 1, with all three jobs ready. No start-up task or address reservation is known to have been made. "Setting the server up" below is the order it was done in. The hardware and Windows facts below were read from the machine on 2026-11-27 from inside WSL (`wsl.exe --version`, `nvidia-smi`, `lscpu`, `free`, `df`, `ip`, and read-only PowerShell `Get-*` and `powercfg` queries); nothing on the Windows side was changed.
 
 - **Windows.** Windows 11 Home, version 10.0.26200.7623 (build 26200). Computer name `GAMEON1`, in the workgroup `WORKGROUP` (no domain). The Windows user profile is `charl`.
 - **WSL.** WSL 3.0.5.0, WSL kernel 6.18.58.1-1 (`6.18.58.1-microsoft-standard-WSL2`), WSLg 1.0.79. One distribution, `Ubuntu-24.04`, WSL version 2, Ubuntu 24.04.5 LTS. Its default user is `schiele` and systemd is on (`/etc/wsl.conf`: `[boot] systemd=true`); `systemctl is-system-running` reads `running`.
@@ -61,7 +64,7 @@ The owner's Windows PC, added on 2026-11-27 to be autobot's GPU inference server
   - Hostname inside WSL is `GAMEON1`. The LAN's DNS resolves `gameon1.lan` to `192.168.86.53`.
   - Windows classifies the LAN as a **Public** network. The Windows Firewall is on for all three profiles.
   - The Hyper-V firewall that guards WSL under mirrored mode (VM creator `{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}`) is enabled with `DefaultInboundAction: Block`, `DefaultOutboundAction: Allow`, `LoopbackEnabled: True` and `AllowHostPolicyMerge: True`. Its only WSL-specific inbound rules today allow some ICMP and mDNS; nothing lets TCP into WSL from the LAN.
-  - From WSL the NUC answers: `branch.lan` resolves to `192.168.86.200` and replies to ping in about 1 ms. Whether the NUC can reach this host is not tested: the server listens on port 8300, but `make server-ping` has not been run on the NUC.
+  - From WSL the NUC answers: `branch.lan` resolves to `192.168.86.200` and replies to ping in about 1 ms. The NUC reaches this host on port 8300: `make server-ping` on the NUC reads `up`, and a request without the token is answered `401` in about 10 ms. The host does not answer the NUC's ping (ICMP), which the firewall rules do not let in and the server does not need.
 - **Power.** The active plan is `Balanced`. Sleep after idle and hibernate after idle on AC are both `0` (never). The machine supports S3 standby, hibernate and Fast Startup. Whether its network adapter can wake the machine (Wake-on-LAN) could not be read: `Get-NetAdapterPowerManagement` failed with "A device attached to the system is not functioning".
 - **Start-up.** No scheduled task starts WSL. WSL starts only when something on Windows runs `wsl.exe`, so after a reboot nothing of the distribution runs until the owner opens it. Once the distribution starts, the server comes back by itself: after a `wsl.exe --shutdown` on 2026-11-27 and the distribution being opened again, `autobot-server.service` and `ollama.service` started with nobody running a command, and all three jobs were ready within about two minutes.
 - **What does not apply here.** No microphone or speaker is used here; the NUC-only refusals (TS-11) stay as they are, because this host's hostname is not `host.nuc_hostname`. The `assistant` project does not exist on this host, so the `camera` agent cannot run here. No voice dataset, Google Cloud key or `gcloud` login exists here, and none is to (IS-6, IS-7).
@@ -98,13 +101,13 @@ What the repository gives this host, and the order to use it in. Steps 1 and 2 a
 
 The unit starts the server when the WSL distribution starts. It exits with status 2, and is not restarted, when the configuration, the token, the host name or the VRAM budget is wrong; a model that fails to load or a GPU taken by a game never ends the process (IS-24).
 
-### The LAN between them (planned)
+### The LAN between them
 
-Nothing below is in place yet; it is what IS-2, IS-3 and IS-13 ask for, recorded here so that the NUC side and the owner's Windows steps agree. The commands that need the owner's rights are listed, not run.
+What IS-2, IS-3 and IS-13 ask for, recorded here so that the NUC side and the owner's Windows steps agree. The port and the firewall are in place since 2026-11-28: the NUC calls the server. The address reservation and the start-up task are not known to be. The commands that need the owner's rights are listed here and were run by the owner, never by a session.
 
 - **Addressing.** The two hosts are on the same `/24`, `192.168.86.0/24`, behind the router at `192.168.86.1`. The NUC is `192.168.86.200` (`branch.lan`); how that address is held (static or reserved) is not recorded. This host is `192.168.86.53` by DHCP. The planned approach is a **DHCP reservation on the router** for MAC `A0-36-BC-B8-C2-71` at `192.168.86.53`, rather than a static address set in Windows, because a reservation lives in one place and survives a Windows reinstall. The NUC is to name the server by address in `config/autobot.toml` (IS-3), not by `gameon1.lan`, so that a DNS lapse cannot break it.
 - **Port.** One TCP port on this host, proposed `8300` (IS-2), carrying the whole HTTP API. It avoids the ports the `assistant` project uses on the NUC (8099, 8123, 8199). Under mirrored mode a server bound to `0.0.0.0:8300` inside WSL is reached at `192.168.86.53:8300` once the firewalls let it in; no `netsh portproxy` is needed.
-- **Firewall.** Two layers must let the NUC in, and only the NUC (IS-13). The owner runs these himself, in PowerShell **as Administrator**; neither has been run or tested:
+- **Firewall.** Two layers must let the NUC in, and only the NUC (IS-13). The owner runs these himself, in PowerShell **as Administrator**. He made the rules on 2026-11-28, after which the NUC reached the port; which of the two he made, and with which profile, is not recorded here:
 
   ```powershell
   # Hyper-V firewall: lets the NUC's TCP into WSL on the server's port
@@ -116,7 +119,7 @@ Nothing below is in place yet; it is what IS-2, IS-3 and IS-13 ask for, recorded
     -Direction Inbound -Protocol TCP -LocalPort 8300 -RemoteAddress 192.168.86.200 -Profile Any -Action Allow
   ```
 
-  Whether the second rule is needed alongside the first, given `AllowHostPolicyMerge: True`, is to be confirmed when the port is first tested from the NUC. Changing the LAN's category to Private (`Set-NetConnectionProfile -InterfaceAlias Ethernet -NetworkCategory Private`) is an alternative to `-Profile Any`, left to the owner.
+  Whether the second rule is needed alongside the first, given `AllowHostPolicyMerge: True`, is still not recorded: the port answers the NUC, but which rules are in place is not known here. Changing the LAN's category to Private (`Set-NetConnectionProfile -InterfaceAlias Ethernet -NetworkCategory Private`) is an alternative to `-Profile Any`, left to the owner.
 - **Start on boot.** Planned: a Windows scheduled task that starts the distribution at boot and keeps a `wsl.exe` process alive so WSL does not shut the VM down when idle, and inside WSL a systemd unit for the server (systemd is already on). The task needs the owner's password to run with nobody logged in; the owner registers it **as Administrator**. Not run or tested:
 
   ```powershell
@@ -190,11 +193,11 @@ The Google Cloud screen builds the `gcloud` commands from those two files and ch
 ## Open Questions
 
 - **GPU server: address reservation.** `GAMEON1` holds `192.168.86.53` by DHCP with no known reservation. Recommended: reserve it on the router for MAC `A0-36-BC-B8-C2-71`. Which router it is, and whether the NUC's `192.168.86.200` is itself reserved or static, are not recorded.
-- **GPU server: firewall.** Neither rule above has been made, and whether the Hyper-V rule alone is enough under `AllowHostPolicyMerge` is untested. The owner decides between `-Profile Any` and reclassifying the LAN as Private.
+- **GPU server: firewall.** The NUC reaches port 8300 since 2026-11-28, so the firewall lets it in. Which rules the owner made (the Hyper-V rule, the Windows Firewall rule or both, and `-Profile Any` or a LAN reclassified as Private) is not recorded, so whether the Hyper-V rule alone is enough under `AllowHostPolicyMerge` is still unknown. That only the NUC's address is let in has not been tested from another machine.
 - **GPU server: start-up and idle shutdown.** No start-up task exists. The unit comes back by itself when the distribution starts (seen after a `wsl.exe --shutdown`), but something on Windows must still start the distribution. Whether a held `sleep infinity` is the right way to keep the WSL VM up with systemd services, or whether WSL 3.0.5 keeps a systemd distribution running on its own with no terminal open, is still unverified. Running the task with nobody logged in needs the owner's stored password on a Home edition machine.
 - **GPU server: sleep and wake.** Sleep is off on AC today. Is the machine also used as the owner's own PC (it is named `GAMEON1`), so that games or Windows Update restarts take the GPU and the host away at times? Can it be woken from the NUC (Wake-on-LAN could not be read)?
 - **GPU server: WSL memory.** WSL gets 15 GiB of the 32 GB. Is that enough for the server's CPU-side work, or should `.wslconfig` set `memory=`? That is a Windows-side change for the owner.
-- **GPU server: not yet called from the NUC.** The server runs on `GAMEON1` and answers over loopback. From the NUC, `make server-token` and `make server-ping` against it are still to be done, and they need the firewall rules above.
+- **GPU server: not yet used by the face.** `make server-ping` on the NUC reads `up` (2026-11-28), so the token and the port are right. No session on the face has yet been routed by tier 3 or answered by the core agent against the real server, and `[server] stt_enabled` is `false`, so no speech has been sent to it.
 - **GPU server: other language models.** Only `qwen3:8b` has been measured. `llama3.1:8b` and a Gemma 4, the other candidates of IS-10, are neither pulled nor measured; `OLLAMA_KV_CACHE_TYPE` is untried.
 - **GPU server: routing details.** `qwen3:8b` picks the right agent 93.3% of the time but the right mode and parameters only 71.7%: the misses are nearly all weather, where it answers `forecast` for "today" questions and `day: "tomorrow"` for the weekend or the week. Whether that is the model, the routing prompt or the test set is not settled.
 

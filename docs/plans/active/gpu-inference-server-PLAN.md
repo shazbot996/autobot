@@ -6,15 +6,15 @@ authority: prescriptive
 status: active
 steps:
   total: 12
-  completed: [1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12]
-  current: 6
+  completed: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+  current: 13
   status:
     1: { state: "completed", run: "schiele/0138", at: "2026-11-27T21:35:24.810Z" }
     2: { state: "completed", run: "schiele/0140", at: "2026-11-27T21:45:10.274Z" }
     3: { state: "completed", run: "schiele/0142", at: "2026-11-27T21:52:14.549Z" }
     4: { state: "completed", run: "schiele/0144", at: "2026-11-27T22:03:35.966Z" }
     5: { state: "completed", written: "schiele/gpu-inference-server-plan-steps-5-to-12", at: "2026-11-27T23:04:42Z" }
-    6: { state: "failed", written: "schiele/gpu-inference-server-plan-steps-5-to-12", at: "2026-11-27T23:04:42Z" }
+    6: { state: "completed", written: "schiele/server-reached-from-the-nuc", at: "2026-11-28T00:44:38Z" }
     7: { state: "completed", written: "schiele/gpu-inference-server-plan-steps-5-to-12", at: "2026-11-27T23:04:42Z" }
     8: { state: "completed", written: "schiele/gpu-inference-server-plan-steps-5-to-12", at: "2026-11-27T23:04:42Z" }
     9: { state: "completed", written: "schiele/gpu-inference-server-plan-steps-5-to-12", at: "2026-11-27T23:04:42Z" }
@@ -136,6 +136,9 @@ provenance:
     mode: apply
   - written: schiele/gameon1-bring-up-run
     at: 2026-11-28T00:38:00Z
+    mode: apply
+  - written: schiele/server-reached-from-the-nuc
+    at: 2026-11-28T00:44:38Z
     mode: apply
 ---
 

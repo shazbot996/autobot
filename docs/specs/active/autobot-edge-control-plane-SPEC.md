@@ -24,6 +24,9 @@ provenance:
   - run: schiele/0153
     at: 2026-11-28T14:02:50.672Z
     mode: revise
+  - run: schiele/0155
+    at: 2026-11-28T14:05:07.567Z
+    mode: revise
 ---
 
 # autobot — edge control plane
@@ -139,12 +142,13 @@ A cancel really stops: the speech, the session and every request still in flight
 9. **EC-9. Every reflex asks for a confirmation by default, and all confirmations share one process and one timing.**
    - **The convention.** A reflex with `confirm = true` asks its `confirm_question` as AG-13's confirmation does: spoken in the local voice, shown in the summary, and answered by the `[words]` yes and no words.
    - **How the answer is heard.** It is taken from the reflex listener's local transcripts, so it works with `GAMEON1` off.
-   - **One process, one timing.** Every reflex confirmation runs through the same code and reads its timing from the same settings in `config/autobot.toml`, not from the reflex's own entry. The timing is how long the question waits for an answer and how long listening stays open after the question has been spoken. Five seconds is the starting window, shorter than the ten seconds of FS-15, because a long wait before autobot falls back to listening again is slow and annoying. A change to the settings changes every confirmation at once.
-   - **An obvious setting.** The window is an obvious, easy-to-find setting in the configuration screens of the game interface, so the owner can change it without editing the file.
+   - **One process, one timing.** Every reflex confirmation runs through the same code and reads its timing from the same settings in `config/autobot.toml`, not from the reflex's own entry. The timing is how long the question waits for an answer and how long listening stays open after the question has been spoken. Five seconds is the starting window, shorter than the ten seconds FS-15 gave the session before this rule, because a long wait before autobot falls back to listening again is slow and annoying. A change to the settings changes every confirmation at once.
+   - **The session's idle listening time.** It also starts at five seconds, not FS-15's ten. It is a separate setting from the confirmation window, so the owner can tune the two apart.
+   - **An obvious setting.** The confirmation window and the session's idle listening time are obvious, easy-to-find settings in the configuration screens of the game interface, so the owner can change them without editing the file.
    - **Effect on the session.** While the question waits, autobot's speech stops after the current sentence. A yes carries out the action. A no, or the time running out, leaves the session where it was, and the speech goes on.
    - **Defaults.** Every reflex ships with `confirm = true`, `cancel` and `stop talking` included. The owner can set `confirm = false` on any of them later, from the configuration interface, if confirming proves unnecessary.
 
-   Reason: the owner wants every reflex to confirm by default and the confirmation shared among them, so that the timing of each request and response window can be shaped later in one place. The window has to be quick, but not so quick that it stops listening before the owner has answered and must be tried again, and not so loose that a stray word is taken for an answer. AG-13 is the existing convention, and reusing it keeps one shape for asking. Confirmation starts on for every reflex because it is not yet known whether it will be effective enough, and turning it off later is a configuration change.
+   Reason: the owner wants every reflex to confirm by default and the confirmation shared among them, so that the timing of each request and response window can be shaped later in one place. The window has to be quick, but not so quick that it stops listening before the owner has answered and must be tried again, and not so loose that a stray word is taken for an answer. The owner found in early testing that autobot sat too long before falling back to listening after a command, and called ten seconds long, so the session's idle time starts at five too. AG-13 is the existing convention, and reusing it keeps one shape for asking. Confirmation starts on for every reflex because it is not yet known whether it will be effective enough, and turning it off later is a configuration change.
 
 10. **EC-10. Cancel really aborts.** When the `cancel` reflex is recognised, and confirmed where it asks (EC-9), autobot does all of this within the budget of EC-16:
     - **Speech stops.** The clip playing is cut, the queued sentences are dropped, and renders not yet played are discarded.
@@ -265,6 +269,7 @@ A cancel really stops: the speech, the session and every request still in flight
 - **Owner's decision.** Every reflex defaults to `confirm = true`, and all confirmations share one process and one timing setting (EC-9).
 - **Owner's decision.** `cancel` and `stop talking` ask first like the rest. The owner will turn confirmation off later through the configuration interface if it proves consistent enough without it (EC-9).
 - **Owner's decision.** The shared confirmation window starts at five seconds, and it is an obvious setting in the configuration screens of the game interface (EC-9).
+- **Owner's decision.** The session's idle listening time also starts at five seconds, matching the confirmation window, as its own setting that can be tuned apart (EC-9).
 - **Owner's decision.** The NUC keeps its present microphone and speaker (EC-3), and the listener stays down when the echo-cancelled source is missing (EC-17).
 - **Default.** A cancel is shown and not spoken, and the spoken keyword `cancel` keeps AG-14's one level back.
 - **Default.** A reflex said outside a session ends the session its own wake opened.
@@ -280,10 +285,10 @@ A cancel really stops: the speech, the session and every request still in flight
 
   The STT entry ("always local"), the faster-whisper entry and the inference server entry ("IS-1 to IS-14") also need updating for `CN-1` as amended.
 - **docs/context/ARCH.md.** Add the edge control plane as a part. Record the listener as the one capture process, with the consumers of EC-2 and the echo canceller in PipeWire. Add the `reflex` event to the socket seam. "Control plane" now names this layer, so the rules layer stops being called the control plane. Close the open question on capture after the wake (EC-14).
-- **docs/context/SCHEMA.md.** Add the `[[reflexes]]` table (`phrase`, `action`, `confirm`, `confirm_question`) and the `reflex` event on `run/listener.sock` (stretch identifier, action, time). Add the shared confirmation timing settings (EC-9), with a starting window of five seconds. Record that `[audio] input_device` and `output_device` name the echo-cancel nodes.
+- **docs/context/SCHEMA.md.** Add the `[[reflexes]]` table (`phrase`, `action`, `confirm`, `confirm_question`) and the `reflex` event on `run/listener.sock` (stretch identifier, action, time). Add the shared confirmation timing settings (EC-9), with a starting window of five seconds, and the session's idle listening time as its own setting, also starting at five seconds. Record that `[audio] input_device` and `output_device` name the echo-cancel nodes.
 - **docs/context/INFRASTRUCTURE.md.** Record the PipeWire echo-cancel configuration on the NUC, with its source and sink node names, and that the AIRHUG 21 stays.
 - **docs/specs/active/autobot-gpu-inference-server-SPEC.md.** Add that a closed connection cancels and frees the job slot within 0.5 s (EC-11), as an amendment to IS-24. Drop IS-8's "takes effect once" condition, which now holds. IS-15 gains: a stretch in which a wake fired is never sent.
-- **docs/specs/active/autobot-the-face-SPEC.md.** FS-4: the meter reads the listener's levels, not its own capture. FS-11: the echo records from the listener's capture. FS-12: the hold no longer silences the reflex listener (EC-13). Add that the detail panel shows the reflexes and the reflexes heard, with the open confirmation and its window (EC-19). Add that the shared confirmation window is an obvious setting in the configuration screens (EC-9).
+- **docs/specs/active/autobot-the-face-SPEC.md.** FS-4: the meter reads the listener's levels, not its own capture. FS-11: the echo records from the listener's capture. FS-12: the hold no longer silences the reflex listener (EC-13). FS-15: the session's idle listening time starts at five seconds, not ten, as its own setting beside the confirmation window (EC-9). Add that the detail panel shows the reflexes and the reflexes heard, with the open confirmation and its window (EC-19). Add that the shared confirmation window and the session's idle listening time are obvious settings in the configuration screens (EC-9).
 - **docs/specs/active/autobot-agents-and-the-agent-tree-SPEC.md.** AG-13: a reflex's confirmation uses the same process and the same timing settings (EC-9). AG-14: the reflex `cancel` ends the session, while the spoken keyword still goes back one level. AG-12: post-wake utterances may go to `GAMEON1`.
 - **docs/specs/active/wake-word-listener-SPEC.md.** WW-4: capture after the wake for every kind (EC-14). WW-8: the reflex listener still hears during the acknowledgement. Close its open question on the end of the speech after a wake.
 - **docs/context/CONSTRAINTS.md.** Its open question on a wake phrase and a command in one utterance is answered by EC-14: that utterance stays on the NUC.
@@ -292,4 +297,4 @@ A cancel really stops: the speech, the session and every request still in flight
 
 ## Open Questions
 
-- **The session's idle listening time.** The owner found, in early testing, that after a wake-word command and then a second-tier application command, autobot sat a long time before it fell back and started listening again, and called ten seconds long. The five-second start is recorded for the shared confirmation window (EC-9). Should the session's own idle listening time (FS-15's ten seconds) also start at five seconds, or does the shorter value apply only to confirmations? Recommended: start both at five seconds, as two separate settings that the owner can tune apart.
+None at present.

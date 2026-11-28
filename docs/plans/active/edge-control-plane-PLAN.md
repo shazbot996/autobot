@@ -64,6 +64,9 @@ provenance:
   - run: schiele/0170
     at: 2026-11-28T15:13:22.574Z
     mode: revise
+  - run: schiele/0171
+    at: 2026-11-28T15:21:27.801Z
+    mode: revise
 ---
 
 # Edge Control Plane — Implementation Plan
@@ -289,6 +292,7 @@ Nothing in the spec is built yet. No `reflex*` file exists. The listener opens t
 4. **The echo's recording comes back as `run/record.wav`.** It is mode 0600 and removed in the tick that reads it, as the snapshot works, which the spec cites as the precedent.
 5. **One transcription per stretch.** The reflex listener's transcript is the waking words, the confirmation's answer and the local fallback turn.
 6. **`make echo-check` refuses while the listener runs,** so the listener's reflexes do not act on the check's playback.
+7. **The studio keeps its own capture.** The Recording session and the Audio screen's test clip are not fan-out consumers. They open only the echo-cancelled source (`[audio] input_device`) and only while the listener is down. Recordings longer than any listener buffer stream straight to the dataset (TS-5), and training on cancelled audio matches what the listener hears.
 
 ## 17. Out of scope
 
@@ -313,9 +317,10 @@ Nothing in the spec is built yet. No `reflex*` file exists. The listener opens t
 
 - **docs/context/SCHEMA.md.** Add the new socket events: `level`, `turn` (with `source`) and `reflex` (with `latency_ms`). Record that `transcript` gains kind `reflex`. Add the `[session]` table, `[audio] raw_input_device`, the `run/listener.requests/` hand-off and `run/record.wav`, beyond what the spec lists.
 - **docs/specs/active/autobot-the-face-SPEC.md.** FS-11: the echo's recording passes through `run/record.wav` for one tick (choice 4).
+- **docs/specs/active/autobot-edge-control-plane-SPEC.md.** EC-2: the studio's Recording session and the Audio screen's test clip are not fan-out consumers. They keep their own capture, on the echo-cancelled source and only while the listener is down (choice 7).
 - **AGENTS.md.** List `make echo-check` and the `deploy/pipewire/` drop-in, and say the listener now makes `/v1/stt` calls during a session.
 - **docs/context/INFRASTRUCTURE.md.** The node names `autobot_ec_source` and `autobot_ec_sink`, and where the drop-in is installed.
 
 ## Open Questions
 
-- **Studio recording and the microphone.** The Recording session and the Audio screen's test clip still open the input device themselves, and EC-2 does not list them as consumers. Should they go through the listener, or keep their own capture? Recommended: they keep their own capture, but open only the echo-cancelled source and only while the listener is down, because recordings longer than any listener buffer stream straight to the dataset (TS-5), and training on cancelled audio matches what the listener hears.
+None.

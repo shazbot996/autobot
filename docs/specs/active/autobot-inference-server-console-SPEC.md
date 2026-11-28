@@ -18,6 +18,9 @@ provenance:
   - run: schiele/0161
     at: 2026-11-28T14:44:44.270Z
     mode: revise
+  - run: schiele/0163
+    at: 2026-11-28T14:47:32.285Z
+    mode: revise
 ---
 
 # autobot — inference server console
@@ -135,10 +138,10 @@ The **inference server console** is a small web-based admin console on `GAMEON1`
       - the GPU memory used and free, against IS-10's budget, part by part;
       - which profiles are installed, previous and candidate, and whether a hold is in force (IC-6).
     - **Models** lists the models Ollama holds, with their size on disk, family, parameter count and quantisation. It says whether each fits the budget at the candidate profile's context and cache type.
-    - **Getting models.** For a model Ollama does not have, the Models screen can pull it. Before it asks Ollama to pull, it shows the tag and the download size and asks the owner to confirm. Nothing is pulled without that confirmation. Ollama does the download, the console shows its progress, and the owner can cancel it.
+    - **Getting models.** For a model Ollama does not have, the Models screen can pull it. The owner asks for a tag, and the console asks Ollama to pull it at once, with no confirmation first. Ollama reports no size until a pull has started, so the console shows the size at the top of the progress, with the tag, as soon as Ollama reports it. Nothing is pulled unless the owner asks for that tag. Ollama does the download, the console shows its progress, and the owner can cancel it.
     - **Removing models.** The console shows the `ollama rm <tag>` command and never runs it.
 
-    Reason: the owner needs to see what the card is doing before he changes it. The server never pulls a model (IS-10). A pull is a multi-gigabyte download, so it happens only as the owner's deliberate, confirmed act, with its size in front of him. A command that removes a model from the host is shown for the owner to run, as the Google Cloud screen does (GC-2).
+    Reason: the owner needs to see what the card is doing before he changes it. The server never pulls a model (IS-10). A pull is a multi-gigabyte download, so it happens only as the owner's deliberate act, with its size put first as soon as it is known. The owner accepts large downloads, so no confirmation is asked before it starts. A command that removes a model from the host is shown for the owner to run, as the Google Cloud screen does (GC-2).
 
 13. **IC-13. Parameters: every setting explained, with its safe range and a recommended value for `qwen3:8b` on the 2080 Ti.**
     - The screen shows each setting of IC-8 in plain words. It gives the setting's safe range and its recommended value, separately for routing and for chat, and says when a change takes effect. It also shows the model's own default as Ollama reports it, which is what applies today, since the server sends no sampling options.
@@ -217,10 +220,10 @@ The **inference server console** is a small web-based admin console on `GAMEON1`
 21. **IC-21. No cloud, no credential, no audio.**
     - The console opens connections only to loopback: the server, and Ollama at `[server] runtime_url`.
     - It holds no Google Cloud credential and calls no Gemini model.
-    - It downloads nothing itself. The one download it starts is the owner-confirmed pull of IC-12, which Ollama carries out. Otherwise `make server-fetch-models` stays the downloader on this host (IS-7, IS-25).
+    - It downloads nothing itself. The one download it starts is the owner-requested pull of IC-12, which Ollama carries out. Otherwise `make server-fetch-models` stays the downloader on this host (IS-7, IS-25).
     - It accepts, sends and stores no audio, and has no speech-to-text or text-to-speech playground.
 
-    Reason: IS-7 keeps this host off every cloud service and keeps the one credential on the NUC. `CN-1`, `CN-2`, TS-5 and IS-6 keep the owner's voice off every path that does not need it, and the console needs none. A confirmed pull is the owner's choice, made with the size shown, and it goes through Ollama on loopback, so the console itself still opens no outside connection.
+    Reason: IS-7 keeps this host off every cloud service and keeps the one credential on the NUC. `CN-1`, `CN-2`, TS-5 and IS-6 keep the owner's voice off every path that does not need it, and the console needs none. A requested pull is the owner's choice, and it goes through Ollama on loopback, so the console itself still opens no outside connection.
 
 ### Runtime control and checks
 
@@ -263,7 +266,7 @@ The **inference server console** is a small web-based admin console on `GAMEON1`
 
 - **Derived (IS-25).** The console refuses off `GAMEON1` with the server's hostname check and message (IC-1).
 - **Derived (IS-12).** The tests drive a pure dispatch function on fakes, and run under `make test` on the NUC through the existing `testpaths` entry for `server/tests` (IC-23, IC-24).
-- **Derived (GC-2).** The console shows `ollama rm` and never runs it (IC-12). It pulls a model only after the owner confirms the size (IC-12).
+- **Derived (GC-2).** The console shows `ollama rm` and never runs it (IC-12). It pulls a model when the owner asks, and shows the size as soon as Ollama reports it (IC-12).
 - **Derived (IS-24).** `keep_alive` is fixed at `-1` and shown read-only, not offered as a setting (IC-13).
 - **Derived (IS-10).** `OLLAMA_NUM_PARALLEL` stays at 1. The model tag and context are shared by routing and chat, because one model is resident (IC-8).
 - **Derived (TS-8).** Candidate, install and revert follow the studio's pattern: the owner confirms, the previous profile is kept, and a revert needs no remeasurement (IC-9).
@@ -286,13 +289,13 @@ The **inference server console** is a small web-based admin console on `GAMEON1`
 - **docs/decisions/0007-home-models-beside-gemini-ADR.md (new, still missing).** The ADR that the server spec and `CONSTRAINTS.md` both call for has not been written. ADR 0008 follows it in number.
 - **docs/specs/active/autobot-gpu-inference-server-SPEC.md.**
   - IS-1: allow a second loopback caller, the console, and the admin path of IC-6.
-  - IS-7: name the console as reaching no cloud service itself, and as pulling a model only through Ollama after the owner confirms its size (IC-12, IC-21).
+  - IS-7: name the console as reaching no cloud service itself, and as pulling a model only through Ollama when the owner asks, showing the size as soon as Ollama reports it (IC-12, IC-21).
   - IS-9 and IS-10: the route prompt, the sampling options per job and the model tag come from the installed profile; without one, from `[server] llm_model`, `llm_context` and `ROUTE_SYSTEM`.
   - IS-11: `/health` reports the installed profile, its context and any hold.
   - IS-25: add the `console-*` targets and `server-test`, `server-lint`, `server-typecheck`.
   - IS-26: the evaluation runs against a profile, writes `run/server-eval-<profile>.json`, and the winner is installed from the console rather than written to `llm_model` by hand.
   - Its "Changes needed elsewhere" entry for `CONSTRAINTS.md` is done for `CN-1` (amended 2026-11-28). `CN-2` is unchanged, so text-to-speech on `GAMEON1` stays open.
-- **AGENTS.md.** Describe the console, its targets and its tests. Say how checks run and are reported on `GAMEON1` (IC-24). An agent never reads the server token file, never runs a command the console shows (`ollama rm`, `systemctl edit ollama.service`), never pulls a model through the console or otherwise, never binds the console off loopback, never adds a firewall rule for it, and never writes the owner's playground text anywhere. Pulling a model is the owner's confirmed act.
+- **AGENTS.md.** Describe the console, its targets and its tests. Say how checks run and are reported on `GAMEON1` (IC-24). An agent never reads the server token file, never runs a command the console shows (`ollama rm`, `systemctl edit ollama.service`), never pulls a model through the console or otherwise, never binds the console off loopback, never adds a firewall rule for it, and never writes the owner's playground text anywhere. Pulling a model is the owner's own act.
 - **docs/context/CONVENTIONS.md.** "Control layers": no web interface is built on the NUC, and the one web interface is the console on `GAMEON1` (ADR 0008). "Layout": the `[[server.profiles]]` keys are read on `GAMEON1` only. The pending "one package per host" change still stands.
 - **docs/context/ARCH.md.** Add the console as a part on `GAMEON1`, with its seams: `/health` and the admin path to the server, loopback to Ollama, and a read of the checkout's configuration.
 - **docs/context/SCHEMA.md.** Add `[[server.profiles]]` and its fields (IC-8), `[server] profile`, `previous_profile`, `candidate_profile` and `console_port`, and the profile settings written into an evaluation report.
@@ -301,4 +304,4 @@ The **inference server console** is a small web-based admin console on `GAMEON1`
 
 ## Open Questions
 
-- **Where the download size comes from.** The console must show a model's download size before the owner confirms a pull (IC-12). Ollama's local API reports a size only once a pull has started. Where should the console get the size beforehand? Options: a registry lookup, which would be a connection to a cloud service that IC-21 does not allow; a small table of known models kept in the console; or starting the pull and asking for confirmation on its first progress report, with a cancel that discards what was fetched.
+None.

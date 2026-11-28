@@ -15,6 +15,9 @@ provenance:
   - run: schiele/0160
     at: 2026-11-28T14:19:49.755Z
     mode: revise
+  - run: schiele/0161
+    at: 2026-11-28T14:44:44.270Z
+    mode: revise
 ---
 
 # autobot — inference server console
@@ -43,10 +46,10 @@ The **inference server console** is a small web-based admin console on `GAMEON1`
 2. **IC-2. It binds `127.0.0.1` on its own port, `8301`, and nothing else.**
    - The owner opens it from a browser on `GAMEON1`'s Windows side, at `http://127.0.0.1:8301/`. WSL's mirrored networking carries Windows loopback to WSL loopback.
    - The bind address is fixed in the code and is not a setting. The port is `[server] console_port`, and it is never `[server] url`'s port.
-   - The console is never reachable from the LAN. It is never put behind the `assistant` project's Cloudflare tunnel or any other proxy, and no firewall rule is added for it, on Windows or in the Hyper-V firewall.
+   - The console is never reachable from the LAN. It is never put behind the `assistant` project's Cloudflare tunnel or any other proxy, and no firewall rule is added for it, on Windows or in the Hyper-V firewall. The owner does not need it from another machine on the LAN for now.
    - When the port is taken, the console stops with one line naming the port.
 
-   Reason: the console changes how the home model answers the house, so the only person who should reach it is the owner sitting at the PC. A loopback bind needs no firewall rule, and making the address a setting would let a typo put it on the LAN. `INFRASTRUCTURE.md` records mirrored mode and the Hyper-V firewall's `LoopbackEnabled: True`. Port `8301` sits next to the server's `8300` and avoids the `assistant` project's 8099, 8123 and 8199.
+   Reason: the console changes how the home model answers the house, so the only person who should reach it is the owner sitting at the PC. A loopback bind needs no firewall rule, and making the address a setting would let a typo put it on the LAN. Reaching it from the LAN would need its own decision, authentication over the network, TLS and a firewall rule. `INFRASTRUCTURE.md` records mirrored mode and the Hyper-V firewall's `LoopbackEnabled: True`. Port `8301` sits next to the server's `8300` and avoids the `assistant` project's 8099, 8123 and 8199.
 
 3. **IC-3. Every request passes a Host and Origin check, and every change carries a per-session token.**
    - **Host.** A request whose `Host` header is not `127.0.0.1:<port>` or `localhost:<port>` is answered `403`.
@@ -113,7 +116,7 @@ The **inference server console** is a small web-based admin console on `GAMEON1`
     - The NUC's reader knows these keys and ignores them, as the server already ignores the NUC's keys.
     - The console writes them as the terminal user interface writes the NUC's settings: back into the one file, with its comments kept.
 
-    Reason: `CONVENTIONS.md` keeps all configuration in that one file, and the server already reads its settings there (IS-3). The two checkouts will drift on these keys, but only the server reads them, as it alone reads `llm_model` today, so the drift changes nothing the NUC does. The cost is a local edit to a tracked file on `GAMEON1`, which a `git pull` must merge, as the NUC's checkout already must. The owner may prefer a file of the server's own (Open Questions).
+    Reason: `CONVENTIONS.md` keeps all configuration in that one file, and the server already reads its settings there (IS-3). The two checkouts will drift on these keys, but only the server reads them, as it alone reads `llm_model` today, so the drift changes nothing the NUC does. The cost is a local edit to a tracked file on `GAMEON1`, which a `git pull` must merge, as the NUC's checkout already must. A file of the server's own was considered and not chosen.
 
 11. **IC-11. A profile that would break the NUC or the card cannot be installed.** The console refuses to save or install a profile when:
     - its context is below `[server] llm_context`, because the NUC trims conversations to that budget (IS-19) and a smaller context would silently cut off the start of the prompt;
@@ -132,9 +135,10 @@ The **inference server console** is a small web-based admin console on `GAMEON1`
       - the GPU memory used and free, against IS-10's budget, part by part;
       - which profiles are installed, previous and candidate, and whether a hold is in force (IC-6).
     - **Models** lists the models Ollama holds, with their size on disk, family, parameter count and quantisation. It says whether each fits the budget at the candidate profile's context and cache type.
-    - **Getting and removing models.** For a model Ollama does not have, the console shows the `ollama pull <tag>` command, and the `ollama rm <tag>` command for removing one. The console never runs either.
+    - **Getting models.** For a model Ollama does not have, the Models screen can pull it. Before it asks Ollama to pull, it shows the tag and the download size and asks the owner to confirm. Nothing is pulled without that confirmation. Ollama does the download, the console shows its progress, and the owner can cancel it.
+    - **Removing models.** The console shows the `ollama rm <tag>` command and never runs it.
 
-    Reason: the owner needs to see what the card is doing before he changes it. The server never pulls a model (IS-10), and a command that changes the host is shown for the owner to run, as the Google Cloud screen does (GC-2).
+    Reason: the owner needs to see what the card is doing before he changes it. The server never pulls a model (IS-10). A pull is a multi-gigabyte download, so it happens only as the owner's deliberate, confirmed act, with its size in front of him. A command that removes a model from the host is shown for the owner to run, as the Google Cloud screen does (GC-2).
 
 13. **IC-13. Parameters: every setting explained, with its safe range and a recommended value for `qwen3:8b` on the 2080 Ti.**
     - The screen shows each setting of IC-8 in plain words. It gives the setting's safe range and its recommended value, separately for routing and for chat, and says when a change takes effect. It also shows the model's own default as Ollama reports it, which is what applies today, since the server sends no sampling options.
@@ -166,7 +170,7 @@ The **inference server console** is a small web-based admin console on `GAMEON1`
     - **Editing.** The screen edits the candidate profile's route prompt and chat format text.
     - **Route preview.** It shows the route prompt rendered with the agent list the NUC would send: the agents and routes of the checkout's `config/autobot.toml`, built as `autobot.cascade` builds them.
     - **Core prompt.** It shows read-only the complete system prompt the NUC would send for the `core` agent: its personality, then the format text, then the handoff list, rendered from the checkout's `config/autobot.toml` as `system_prompt` renders it. It also shows the core agent's tools as `tools_of` renders them.
-    - **The format text does not reach the NUC.** A profile's format text is what the console's Playground and Evaluation use. Installing a profile does not change what the NUC sends: that comes from the NUC's own code (Open Questions).
+    - **The format text does not reach the NUC.** A profile's format text is what the console's Playground and Evaluation use. Installing a profile does not change what the NUC sends: that comes from the NUC's own code. The next spec moves the format text into the core agent's definition in `config/autobot.toml`, edited in the NUC's Agent editor, and the console then shows the difference between the two.
 
     Reason: the owner cannot tune a prompt he cannot see whole. The route prompt is the server's own, so the server can use the installed one. The format text is part of the agent's answer shape, which the agent builds on the NUC (AG-4, IS-21), and changing what the NUC sends is outside this spec.
 
@@ -213,10 +217,10 @@ The **inference server console** is a small web-based admin console on `GAMEON1`
 21. **IC-21. No cloud, no credential, no audio.**
     - The console opens connections only to loopback: the server, and Ollama at `[server] runtime_url`.
     - It holds no Google Cloud credential and calls no Gemini model.
-    - It downloads nothing. `make server-fetch-models` stays the only downloader on this host (IS-7, IS-25).
+    - It downloads nothing itself. The one download it starts is the owner-confirmed pull of IC-12, which Ollama carries out. Otherwise `make server-fetch-models` stays the downloader on this host (IS-7, IS-25).
     - It accepts, sends and stores no audio, and has no speech-to-text or text-to-speech playground.
 
-    Reason: IS-7 keeps this host off every cloud service and keeps the one credential on the NUC. `CN-1`, `CN-2`, TS-5 and IS-6 keep the owner's voice off every path that does not need it, and the console needs none.
+    Reason: IS-7 keeps this host off every cloud service and keeps the one credential on the NUC. `CN-1`, `CN-2`, TS-5 and IS-6 keep the owner's voice off every path that does not need it, and the console needs none. A confirmed pull is the owner's choice, made with the size shown, and it goes through Ollama on loopback, so the console itself still opens no outside connection.
 
 ### Runtime control and checks
 
@@ -259,7 +263,7 @@ The **inference server console** is a small web-based admin console on `GAMEON1`
 
 - **Derived (IS-25).** The console refuses off `GAMEON1` with the server's hostname check and message (IC-1).
 - **Derived (IS-12).** The tests drive a pure dispatch function on fakes, and run under `make test` on the NUC through the existing `testpaths` entry for `server/tests` (IC-23, IC-24).
-- **Derived (IS-10, GC-2).** The console shows `ollama pull` and `ollama rm` and never runs them (IC-12).
+- **Derived (GC-2).** The console shows `ollama rm` and never runs it (IC-12). It pulls a model only after the owner confirms the size (IC-12).
 - **Derived (IS-24).** `keep_alive` is fixed at `-1` and shown read-only, not offered as a setting (IC-13).
 - **Derived (IS-10).** `OLLAMA_NUM_PARALLEL` stays at 1. The model tag and context are shared by routing and chat, because one model is resident (IC-8).
 - **Derived (TS-8).** Candidate, install and revert follow the studio's pattern: the owner confirms, the previous profile is kept, and a revert needs no remeasurement (IC-9).
@@ -282,13 +286,13 @@ The **inference server console** is a small web-based admin console on `GAMEON1`
 - **docs/decisions/0007-home-models-beside-gemini-ADR.md (new, still missing).** The ADR that the server spec and `CONSTRAINTS.md` both call for has not been written. ADR 0008 follows it in number.
 - **docs/specs/active/autobot-gpu-inference-server-SPEC.md.**
   - IS-1: allow a second loopback caller, the console, and the admin path of IC-6.
-  - IS-7: name the console as reaching no cloud service and pulling nothing.
+  - IS-7: name the console as reaching no cloud service itself, and as pulling a model only through Ollama after the owner confirms its size (IC-12, IC-21).
   - IS-9 and IS-10: the route prompt, the sampling options per job and the model tag come from the installed profile; without one, from `[server] llm_model`, `llm_context` and `ROUTE_SYSTEM`.
   - IS-11: `/health` reports the installed profile, its context and any hold.
   - IS-25: add the `console-*` targets and `server-test`, `server-lint`, `server-typecheck`.
   - IS-26: the evaluation runs against a profile, writes `run/server-eval-<profile>.json`, and the winner is installed from the console rather than written to `llm_model` by hand.
   - Its "Changes needed elsewhere" entry for `CONSTRAINTS.md` is done for `CN-1` (amended 2026-11-28). `CN-2` is unchanged, so text-to-speech on `GAMEON1` stays open.
-- **AGENTS.md.** Describe the console, its targets and its tests. Say how checks run and are reported on `GAMEON1` (IC-24). An agent never reads the server token file, never runs a command the console shows (`ollama pull`, `ollama rm`, `systemctl edit ollama.service`), never binds the console off loopback, never adds a firewall rule for it, and never writes the owner's playground text anywhere.
+- **AGENTS.md.** Describe the console, its targets and its tests. Say how checks run and are reported on `GAMEON1` (IC-24). An agent never reads the server token file, never runs a command the console shows (`ollama rm`, `systemctl edit ollama.service`), never pulls a model through the console or otherwise, never binds the console off loopback, never adds a firewall rule for it, and never writes the owner's playground text anywhere. Pulling a model is the owner's confirmed act.
 - **docs/context/CONVENTIONS.md.** "Control layers": no web interface is built on the NUC, and the one web interface is the console on `GAMEON1` (ADR 0008). "Layout": the `[[server.profiles]]` keys are read on `GAMEON1` only. The pending "one package per host" change still stands.
 - **docs/context/ARCH.md.** Add the console as a part on `GAMEON1`, with its seams: `/health` and the admin path to the server, loopback to Ollama, and a read of the checkout's configuration.
 - **docs/context/SCHEMA.md.** Add `[[server.profiles]]` and its fields (IC-8), `[server] profile`, `previous_profile`, `candidate_profile` and `console_port`, and the profile settings written into an evaluation report.
@@ -297,9 +301,4 @@ The **inference server console** is a small web-based admin console on `GAMEON1`
 
 ## Open Questions
 
-- **Port.** Should the console use port `8301`? Recommended: `8301`, because it sits beside the server's `8300` and clashes with nothing on either host.
-- **Separate process.** Should the console be a process of its own, or part of the server? Recommended: separate (IC-5), because a console fault must never take port 8300 down.
-- **Where profiles are stored.** Should profiles live in `[[server.profiles]]` in `GAMEON1`'s checkout of `config/autobot.toml`, or in a file of the server's own, such as one under `~/.config/autobot-server/`? Recommended: `config/autobot.toml` (IC-10), because it keeps `CONVENTIONS.md`'s one-file rule, and the drift between checkouts is in keys the NUC never reads.
-- **`ollama pull`.** May the console ever run `ollama pull` itself, behind a confirmation? Recommended: never; it shows the command (IC-12), because a multi-gigabyte download is a deliberate act of the owner's, and IS-7 keeps every download in one target.
-- **Reach from the LAN.** Will the owner ever want to open the console from another machine on the LAN? Recommended: no, because that would need its own decision, authentication over the network, TLS and a firewall rule. Loopback needs none of them.
-- **How a format text reaches the NUC.** Once a profile's chat format text measures better, how should the NUC come to send it? Recommended: the next spec moves the format text into the core agent's definition in `config/autobot.toml`, edited in the NUC's Agent editor. The console then shows the difference between the two.
+- **Where the download size comes from.** The console must show a model's download size before the owner confirms a pull (IC-12). Ollama's local API reports a size only once a pull has started. Where should the console get the size beforehand? Options: a registry lookup, which would be a connection to a cloud service that IC-21 does not allow; a small table of known models kept in the console; or starting the pull and asking for confirmation on its first progress report, with a cancel that discards what was fetched.

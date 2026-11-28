@@ -24,6 +24,9 @@ provenance:
   - run: schiele/0165
     at: 2026-11-28T14:55:42.759Z
     mode: revise
+  - run: schiele/0167
+    at: 2026-11-28T15:06:53.484Z
+    mode: revise
 ---
 
 # autobot — inference server console
@@ -114,7 +117,7 @@ The **inference server console** is a small web-based admin console on `GAMEON1`
    - **Profiles and the candidate.** The Profiles screen lists every profile and marks the installed one, the previous one and the candidate. The owner makes a profile by copying an existing one. With none yet, the first profile copies the server's current settings: `[server] llm_model` and `llm_context`, `ROUTE_SYSTEM`, `FORMAT` with `HANDOFF_FORMAT`, Ollama's own defaults for the model, `[server] stt_model` and `stt_compute_type`, and the speech-to-text values the server uses today (IC-26).
    - **Install.** Installing names the candidate as the installed profile, keeps the one it replaces as the previous profile, and reloads the server (IC-6).
    - **Revert.** Reverting swaps the installed and previous profiles back, with the same confirmation and reload.
-   - **The confirmation.** It shows the candidate's evaluation beside the installed profile's (IC-18). It says so plainly when the candidate has no report, or when its report fails IS-26's criterion. It also says when the install reloads the speech model, because the NUC then transcribes with `tiny.en` until `stt` is ready again. The install is still the owner's choice.
+   - **The confirmation.** It shows the candidate's evaluation beside the installed profile's (IC-18). It says so plainly when the candidate has no report, when its report fails IS-26's criterion, or when its report has no speech-to-text measurement. It also says when the install reloads the speech model, because the NUC then transcribes with `tiny.en` until `stt` is ready again. The install is still the owner's choice.
    - **No profile installed.** The server answers exactly as it does today, from `[server] llm_model`, `llm_context`, `stt_model` and `stt_compute_type`, with its built-in speech-to-text values.
 
    Reason: a setting the house hears every day should be judged by the owner and should be cheap to take back. A revert that needs no remeasurement is what makes trying a candidate cheap (TS-8). A checkout with no profiles must keep working unchanged.
@@ -197,16 +200,18 @@ The **inference server console** is a small web-based admin console on `GAMEON1`
 
 18. **IC-18. Evaluation: `make server-eval` against a profile, and reports side by side.**
     - **Running it.** The screen runs the evaluation of IS-26 against the candidate profile, or any other, as a subprocess, one run at a time, and shows its output as it comes.
+    - **What it measures.** Routing and chat, from typed and committed utterances, and speech-to-text, from the committed WAV fixtures in `tests/fixtures/audio/`. Those fixtures are synthesised and are not the owner's voice (TS-5). The speech-to-text measurement transcribes each fixture with the profile's speech-to-text settings (IC-26) and compares the result with the text the fixture was made from.
     - **The report.** Each run writes `run/server-eval-<profile>.json`, with the profile's full settings in it, so that a report says what it measured.
     - **Side by side.** The screen sets reports next to each other:
       - right agent;
       - right agent, mode and parameters;
       - JSON validity for routing and for chat;
       - routing latency, median, p95 and maximum, against 1.5 s;
-      - chat's first token against 2.0 s.
-    - **The criterion.** IS-26's criterion is shown in its own words. The screen marks which report it favours: of those within the latency budget, the best on right agent, mode and parameters, then on JSON validity.
+      - chat's first token against 2.0 s;
+      - speech-to-text word error rate over the fixtures, and the time each transcription took.
+    - **The criterion.** IS-26's criterion is shown in its own words. The screen marks which report it favours: of those within the latency budget, the best on right agent, mode and parameters, then on JSON validity. The speech-to-text figures are shown beside it for the owner to weigh, and are not part of that criterion.
 
-    Reason: IS-26 is how the home model is chosen, and the console is where the owner chooses it. A report that names its profile cannot be mistaken for another. The utterances are typed and committed, so no owner audio is involved (TS-5).
+    Reason: IS-26 is how the home model is chosen, and the console is where the owner chooses it. A report that names its profile cannot be mistaken for another. The utterances and fixtures are committed, so no owner audio is involved (TS-5). Speech-to-text settings are installed with the rest of the profile (IC-8), so they are measured with it; until measured, a speech-to-text change is a guess.
 
 ### State and boundaries
 
@@ -228,7 +233,7 @@ The **inference server console** is a small web-based admin console on `GAMEON1`
     - The console opens connections only to loopback: the server, and Ollama at `[server] runtime_url`.
     - It holds no Google Cloud credential and calls no Gemini model.
     - It downloads nothing itself. The one download it starts is the owner-requested pull of IC-12, which Ollama carries out. Otherwise `make server-fetch-models` stays the downloader on this host (IS-7, IS-25).
-    - It accepts, sends and stores no audio, and has no speech-to-text or text-to-speech playground. Its Speech-to-text screen (IC-26) edits settings only.
+    - It accepts, sends and stores no audio, and has no speech-to-text or text-to-speech playground. Its Speech-to-text screen (IC-26) edits settings only. The speech-to-text evaluation of IC-18 is a subprocess that reads the committed fixtures, and the console shows only its text results.
 
     Reason: IS-7 keeps this host off every cloud service, and ADR 0007 keeps the one credential on the NUC. `CN-1`, `CN-2`, TS-5 and IS-6 keep the owner's voice off every path that does not need it, and the console needs none. A requested pull is the owner's choice, and it goes through Ollama on loopback, so the console itself still opens no outside connection.
 
@@ -286,6 +291,7 @@ The **inference server console** is a small web-based admin console on `GAMEON1`
     | Temperature | One deterministic pass, bounded in time. | fixed at 0 | read-only | — |
 
     - **Refusals.** The console refuses to save or install a profile whose speech model directory lacks one of its three files, whose compute type is not one of the two, whose beam size is below 1, or whose hotwords wording does not contain `{hints}` exactly once or contains any other brace. Any other value outside the safe range is allowed, and is marked in the editor and in the install confirmation, as IC-11 does.
+    - **Measuring.** A speech-to-text setting is measured by the evaluation of IC-18, from the committed fixtures. The install confirmation says so plainly when the candidate's report has no speech-to-text measurement (IC-9).
     - **No audio here.** The screen shows and edits settings only. It records, accepts and plays no audio, and transcribes nothing (IC-21). Audio capture and the NUC's listener are not configured here.
     - **The NUC is unaffected.** The NUC never names the server's model (IS-8). It keeps sending one whole utterance after a wake with its hints, and falls back to `tiny.en` when the server is away (IS-4, EC-14).
 
@@ -308,6 +314,7 @@ The **inference server console** is a small web-based admin console on `GAMEON1`
 - **Resolved.** IC-21 said the console handles no audio. The Speech-to-text screen edits settings only, so that stays true, and IC-21 now names the screen.
 - **Resolved.** IC-6 said a reload always leaves `stt` loaded. It now reloads `stt` only when a profile changes the speech model or compute type, which keeps IC-6's reason for not reloading it otherwise.
 - **Resolved.** ADR 0007 is cited as the owner states it is written. It was not yet present in `docs/decisions/` when this revision was made, and ADR 0008 still follows it in number.
+- **Resolved.** Speech-to-text settings are measured by adding a speech-to-text evaluation to `make server-eval`, run from the committed synthesised WAV fixtures in `tests/fixtures/audio/` and not from the owner's voice (IC-18, IC-26).
 - **Default.** The speech-to-text settings are part of the profile, so they are installed and reverted with the home model's (IC-8, IC-9). This reuses the candidate, install and revert pattern rather than adding a second one.
 - **Default.** The recommended speech-to-text values are what the server uses today, and faster-whisper's own defaults for the VAD settings (IC-26).
 - **Default.** Language and temperature are shown read-only, as `keep_alive` is on the Parameters screen (IC-26).
@@ -322,15 +329,15 @@ The **inference server console** is a small web-based admin console on `GAMEON1`
   - IS-8, IS-10 and IS-16: the speech model, compute type, beam size, VAD filter and its settings, hotwords wording and initial prompt come from the installed profile; without one, from `[server] stt_model`, `stt_compute_type` and the server's built-in values (IC-26). A reload reloads `stt` only when the model or compute type changes (IC-6).
   - IS-11: `/health` reports the installed profile, its context and any hold.
   - IS-25: add the `console-*` targets and `server-test`, `server-lint`, `server-typecheck`.
-  - IS-26: the evaluation runs against a profile, writes `run/server-eval-<profile>.json`, and the winner is installed from the console rather than written to `llm_model` by hand.
+  - IS-26: the evaluation runs against a profile, writes `run/server-eval-<profile>.json`, and the winner is installed from the console rather than written to `llm_model` by hand. It also measures speech-to-text from the committed WAV fixtures in `tests/fixtures/audio/`, reporting word error rate and transcription time, outside the winner criterion (IC-18).
   - Its "Changes needed elsewhere" entry for `CONSTRAINTS.md` is done for `CN-1` (amended 2026-11-28). `CN-2` is unchanged, so text-to-speech on `GAMEON1` stays open.
 - **AGENTS.md.** Describe the console, its targets and its tests. Say how checks run and are reported on `GAMEON1` (IC-24). An agent never reads the server token file, never runs a command the console shows (`ollama rm`, `systemctl edit ollama.service`), never pulls a model through the console or otherwise, never binds the console off loopback, never adds a firewall rule for it, and never writes the owner's playground text anywhere. Pulling a model is the owner's own act.
 - **docs/context/CONVENTIONS.md.** "Control layers": no web interface is built on the NUC, and the one web interface is the console on `GAMEON1` (ADR 0008). "Layout": the `[[server.profiles]]` keys are read on `GAMEON1` only. The pending "one package per host" change still stands.
 - **docs/context/ARCH.md.** Add the console as a part on `GAMEON1`, with its seams: `/health` and the admin path to the server, loopback to Ollama, and a read of the checkout's configuration.
-- **docs/context/SCHEMA.md.** Add `[[server.profiles]]` and its fields (IC-8), including the speech-to-text fields of IC-26, `[server] profile`, `previous_profile`, `candidate_profile` and `console_port`, and the profile settings written into an evaluation report.
+- **docs/context/SCHEMA.md.** Add `[[server.profiles]]` and its fields (IC-8), including the speech-to-text fields of IC-26, `[server] profile`, `previous_profile`, `candidate_profile` and `console_port`, and the profile settings written into an evaluation report, with its speech-to-text measurement (IC-18).
 - **docs/context/GLOSSARY.md.** Add "edge layer", "home layer", "home model", "cloud layer", "console", "profile", "candidate profile" and "installed profile". Restate "tier" as the IS-17 routing tier only. Split "agent" (runs a spoken session on the NUC) from "tool" (a function the home model asks for and the NUC runs), and reconcile the existing "agent tool" entry. Update "STT", "TTS" and "faster-whisper", which still say speech-to-text is always on the local machine.
 - **docs/context/INFRASTRUCTURE.md.** Under "The server as it runs on `GAMEON1`", record the console's unit, port, loopback bind and log, and that it is reached from Windows over mirrored networking with no firewall rule.
 
 ## Open Questions
 
-- **Measuring a speech-to-text setting.** IC-18 measures routing and chat only, and the console handles no audio (IC-21), so nothing yet measures whether a speech-to-text change transcribes better. Recommended: add a speech-to-text evaluation to `make server-eval` in a later revision, run from the committed WAV fixtures in `tests/fixtures/audio/`, which are synthesised and not the owner's voice (TS-5). Until then, the Speech-to-text screen's install confirmation says that the candidate's speech-to-text settings are unmeasured.
+None.

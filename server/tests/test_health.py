@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from autobot_server.contract import GpuMemory, Health, contract_version
@@ -10,6 +12,7 @@ from autobot_server.gpu import (
     GpuError,
     budget,
     check_budget,
+    find_nvidia_smi,
     parse_memory,
 )
 from autobot_server.health import health
@@ -76,3 +79,24 @@ def test_a_job_not_ready_says_why_and_its_model_is_not_touched() -> None:
 def test_health_answers_when_the_card_cannot_be_read() -> None:
     answer = health(health_jobs(), FakeGpu(broken=True), "1")
     assert answer.gpu == GpuMemory(used_mib=0, free_mib=0)
+
+
+def test_nvidia_smi_is_found_on_the_path_or_where_wsl_puts_it(tmp_path: Path) -> None:
+    on_path = tmp_path / "bin"
+    on_path.mkdir()
+    tool = on_path / "nvidia-smi"
+    tool.write_text("#!/bin/sh\n")
+    tool.chmod(0o755)
+    wsl = tmp_path / "wsl" / "nvidia-smi"
+    assert find_nvidia_smi(str(on_path), wsl) == str(tool)
+
+    # A systemd user unit's PATH has no /usr/lib/wsl/lib.
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    wsl.parent.mkdir()
+    wsl.write_text("")
+    assert find_nvidia_smi(str(empty), wsl) == str(wsl)
+
+    wsl.unlink()
+    with pytest.raises(GpuError, match="nvidia-smi not found"):
+        find_nvidia_smi(str(empty), wsl)

@@ -44,7 +44,7 @@ import socket
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from autobot_server.__main__ import READY_MESSAGE
@@ -61,6 +61,7 @@ from autobot_server.hostcheck import WrongHostError, require_server_host
 UNIT_NAME = "autobot-server.service"
 UNIT_TEMPLATE = Path("deploy") / UNIT_NAME
 REPO_ROOT_PLACEHOLDER = "@REPO_ROOT@"
+CUDA_LIBRARY_PATH_PLACEHOLDER = "@CUDA_LIBRARY_PATH@"
 # The server's own virtual environment, made by `make server-setup`.
 VENV = Path(".venv-server")
 RUN_DIR = Path("run")
@@ -90,13 +91,52 @@ def unit_installed() -> bool:
     return unit_path().is_file()
 
 
-def render_unit(template: str, root: Path) -> str:
-    """The unit file text for a checkout at `root`."""
+def cuda_library_dirs(venv: Path) -> list[Path]:
+    """The `lib` directories of the NVIDIA wheels installed in `venv`.
+
+    cuBLAS and cuDNN come from pip wheels (`nvidia-cublas-cu12`,
+    `nvidia-cudnn-cu12`), and the dynamic loader does not search their
+    directories: without them on `LD_LIBRARY_PATH`, CTranslate2 fails to load
+    the speech model with "libcublas.so.12 is not found". The driver's own
+    `libcuda.so` is found through WSL's `/etc/ld.so.conf.d/ld.wsl.conf`.
+    """
+    return sorted(
+        path
+        for path in venv.glob("lib/python*/site-packages/nvidia/*/lib")
+        if path.is_dir()
+    )
+
+
+def server_environment(base: Mapping[str, str], venv: Path) -> dict[str, str]:
+    """The environment the foreground server is started with.
+
+    It is the unit's: unbuffered output, and the NVIDIA wheels' libraries
+    ahead of any `LD_LIBRARY_PATH` already set, so that both modes load the
+    same libraries.
+    """
+    environment = {**base, "PYTHONUNBUFFERED": "1"}
+    directories = [str(path) for path in cuda_library_dirs(venv)]
+    existing = base.get("LD_LIBRARY_PATH", "")
+    if existing:
+        directories.append(existing)
+    if directories:
+        environment["LD_LIBRARY_PATH"] = ":".join(directories)
+    return environment
+
+
+def render_unit(template: str, root: Path, library_dirs: Sequence[Path] = ()) -> str:
+    """The unit file text for a checkout at `root`.
+
+    `library_dirs` fills the unit's `LD_LIBRARY_PATH` (`cuda_library_dirs`).
+    """
     if any(character.isspace() for character in str(root)):
         raise ControlError(
             f"cannot install the unit: the checkout's path has a space in it: {root}"
         )
-    return template.replace(REPO_ROOT_PLACEHOLDER, str(root))
+    library_path = ":".join(str(path) for path in library_dirs)
+    return template.replace(REPO_ROOT_PLACEHOLDER, str(root)).replace(
+        CUDA_LIBRARY_PATH_PLACEHOLDER, library_path
+    )
 
 
 # --- processes ---------------------------------------------------------------
@@ -249,7 +289,7 @@ def cmd_up(args: argparse.Namespace) -> int:
             stdout=log,
             stderr=subprocess.STDOUT,
             start_new_session=True,
-            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            env=server_environment(os.environ, resolve_checkout_path(VENV)),
         )
     pid_file = resolve_checkout_path(PID_FILE)
     pid_file.write_text(f"{process.pid}\n")
@@ -392,7 +432,7 @@ def cmd_install(args: argparse.Namespace) -> int:
     root = checkout_root()
     template = resolve_checkout_path(UNIT_TEMPLATE)
     try:
-        text = render_unit(template.read_text(), root)
+        text = render_unit(template.read_text(), root, cuda_library_dirs(root / VENV))
     except OSError as error:
         raise ControlError(
             f"cannot read the unit template {template}: {error.strerror}"

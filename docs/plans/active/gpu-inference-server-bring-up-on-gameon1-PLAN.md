@@ -6,17 +6,16 @@ authority: prescriptive
 status: active
 steps:
   total: 8
-  completed: []
-  current: 1
+  completed: [1, 2, 3, 4, 5, 6, 7, 8]
   status:
-    1: { state: "pending" }
-    2: { state: "pending" }
-    3: { state: "pending" }
-    4: { state: "pending" }
-    5: { state: "pending" }
-    6: { state: "pending" }
-    7: { state: "pending" }
-    8: { state: "pending" }
+    1: { state: "completed", written: "schiele/gameon1-bring-up-run", at: "2026-11-27T23:58:00Z" }
+    2: { state: "completed", written: "schiele/gameon1-bring-up-run", at: "2026-11-27T23:58:00Z" }
+    3: { state: "completed", written: "schiele/gameon1-bring-up-run", at: "2026-11-28T00:16:00Z" }
+    4: { state: "completed", written: "schiele/gameon1-bring-up-run", at: "2026-11-28T00:16:00Z" }
+    5: { state: "completed", written: "schiele/gameon1-bring-up-run", at: "2026-11-28T00:16:00Z" }
+    6: { state: "completed", written: "schiele/gameon1-bring-up-run", at: "2026-11-28T00:25:00Z" }
+    7: { state: "completed", written: "schiele/gameon1-bring-up-run", at: "2026-11-28T00:26:00Z" }
+    8: { state: "completed", written: "schiele/gameon1-bring-up-run", at: "2026-11-28T00:38:00Z" }
 describes:
   - config/autobot.toml
   - Makefile
@@ -39,6 +38,9 @@ provenance:
   - written: schiele/gameon1-bring-up-plan
     at: 2026-11-27T23:52:45Z
     mode: create
+  - written: schiele/gameon1-bring-up-run
+    at: 2026-11-27T23:58:00Z
+    mode: apply
 ---
 
 # GPU Inference Server Bring-up on GAMEON1 — Implementation Plan

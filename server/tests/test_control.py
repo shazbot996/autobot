@@ -177,6 +177,7 @@ def test_the_unit_is_rendered_from_the_template_for_this_checkout() -> None:
     template = (checkout_root() / control.UNIT_TEMPLATE).read_text(encoding="utf-8")
     text = control.render_unit(template, Path("/home/schiele/autobot"))
     assert "@REPO_ROOT@" not in text
+    assert "@CUDA_LIBRARY_PATH@" not in text
     assert (
         "ExecStart=/home/schiele/autobot/.venv-server/bin/python -m autobot_server"
         in text
@@ -187,6 +188,33 @@ def test_the_unit_is_rendered_from_the_template_for_this_checkout() -> None:
     assert "WantedBy=default.target" in text
     with pytest.raises(control.ControlError):
         control.render_unit(template, Path("/home/some one/autobot"))
+
+
+def test_the_nvidia_wheels_libraries_are_on_the_path_in_both_modes(
+    tmp_path: Path,
+) -> None:
+    venv = tmp_path / ".venv-server"
+    site = venv / "lib" / "python3.12" / "site-packages" / "nvidia"
+    for wheel in ("cudnn", "cublas"):
+        (site / wheel / "lib").mkdir(parents=True)
+    (site / "cuda_nvrtc").mkdir()
+    dirs = control.cuda_library_dirs(venv)
+    assert dirs == [site / "cublas" / "lib", site / "cudnn" / "lib"]
+
+    environment = control.server_environment({"LD_LIBRARY_PATH": "/opt/x"}, venv)
+    assert environment["LD_LIBRARY_PATH"] == (
+        f"{site / 'cublas' / 'lib'}:{site / 'cudnn' / 'lib'}:/opt/x"
+    )
+    assert environment["PYTHONUNBUFFERED"] == "1"
+    assert "LD_LIBRARY_PATH" not in control.server_environment({}, tmp_path / "none")
+
+    template = (checkout_root() / control.UNIT_TEMPLATE).read_text(encoding="utf-8")
+    text = control.render_unit(template, tmp_path, dirs)
+    assert "@CUDA_LIBRARY_PATH@" not in text
+    assert (
+        f"Environment=LD_LIBRARY_PATH={site / 'cublas' / 'lib'}:{site / 'cudnn' / 'lib'}"
+        in text
+    )
 
 
 def test_up_waits_for_the_serving_line_and_reports_a_start_that_died(

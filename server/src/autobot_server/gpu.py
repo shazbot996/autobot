@@ -13,7 +13,9 @@ provides; no CUDA binding is imported (plan choice 3).
 
 from __future__ import annotations
 
+import shutil
 import subprocess
+from pathlib import Path
 from typing import Protocol
 
 from autobot_server.contract import Budget, GpuMemory
@@ -25,11 +27,14 @@ LLM_KV_CACHE_MIB = 1536
 CUDA_CONTEXTS_MIB = 1024
 TOTAL_MIB = STT_MIB + LLM_WEIGHTS_MIB + LLM_KV_CACHE_MIB + CUDA_CONTEXTS_MIB
 
-NVIDIA_SMI = (
-    "nvidia-smi",
+NVIDIA_SMI_ARGUMENTS = (
     "--query-gpu=memory.used,memory.free",
     "--format=csv,noheader,nounits",
 )
+# Where the WSL driver puts `nvidia-smi`. A login shell has the directory on
+# its PATH, but a systemd user unit does not, so it is looked for here when
+# the PATH has no `nvidia-smi`.
+WSL_NVIDIA_SMI = Path("/usr/lib/wsl/lib/nvidia-smi")
 # How long `nvidia-smi` may take, in seconds.
 NVIDIA_SMI_TIMEOUT = 5.0
 
@@ -55,6 +60,18 @@ def budget() -> Budget:
     )
 
 
+def find_nvidia_smi(
+    path: str | None = None, wsl_fallback: Path = WSL_NVIDIA_SMI
+) -> str:
+    """The `nvidia-smi` to run: from `path` (the PATH when `None`), else WSL's."""
+    found = shutil.which("nvidia-smi", path=path)
+    if found is not None:
+        return found
+    if wsl_fallback.is_file():
+        return str(wsl_fallback)
+    raise GpuError("nvidia-smi not found: the WSL GPU driver is not installed")
+
+
 def check_budget(gpu: Gpu) -> None:
     """Raise `GpuError` when the budget exceeds the card's memory, used and free."""
     memory = gpu.memory()
@@ -69,9 +86,10 @@ class NvidiaSmi:
     """The first card's memory, read with `nvidia-smi`."""
 
     def memory(self) -> GpuMemory:
+        command = (find_nvidia_smi(), *NVIDIA_SMI_ARGUMENTS)
         try:
             done = subprocess.run(
-                NVIDIA_SMI,
+                command,
                 capture_output=True,
                 text=True,
                 timeout=NVIDIA_SMI_TIMEOUT,

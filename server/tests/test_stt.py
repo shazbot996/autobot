@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import base64
 import io
 import json
@@ -289,10 +290,28 @@ def test_decode_wav_gives_the_frames_and_their_seconds() -> None:
     assert seconds == pytest.approx(1.0)
 
 
-def test_the_offline_environment_is_the_nucs(monkeypatch: pytest.MonkeyPatch) -> None:
-    from autobot.listener.models import _OFFLINE_ENV as NUC_OFFLINE_ENV
+def nuc_offline_env() -> dict[str, str]:
+    """The NUC's `_OFFLINE_ENV`, read from its source rather than imported.
 
-    assert _OFFLINE_ENV == NUC_OFFLINE_ENV
+    The server's tests run in `.venv-server` on GAMEON1, where the NUC's
+    `autobot` package is not installed, so the dict is taken from the file.
+    """
+    source = (
+        checkout_root() / "src" / "autobot" / "listener" / "models.py"
+    ).read_text()
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "_OFFLINE_ENV"
+            for target in node.targets
+        ):
+            value = ast.literal_eval(node.value)
+            assert isinstance(value, dict)
+            return value
+    raise AssertionError("src/autobot/listener/models.py defines no _OFFLINE_ENV")
+
+
+def test_the_offline_environment_is_the_nucs(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _OFFLINE_ENV == nuc_offline_env()
     for name in _OFFLINE_ENV:
         monkeypatch.delenv(name, raising=False)
     enforce_offline()

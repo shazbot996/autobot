@@ -308,7 +308,7 @@ stt_model = "models/faster-whisper/large-v3-turbo"
 stt_compute_type = "int8_float16"
 # The language model, as the runtime names it. Empty until `make server-eval`
 # has measured the candidates and the owner has written the winner here.
-llm_model = ""
+llm_model = "qwen3:8b"
 # The language model's context, in tokens.
 llm_context = 8192
 # The runtime that serves the language model, bound to loopback on GAMEON1.

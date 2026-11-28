@@ -12,6 +12,7 @@ prompts/*/DRAFT.prompt.md
 
 # python
 .venv/
+.venv-server/
 __pycache__/
 *.py[cod]
 *.egg-info/

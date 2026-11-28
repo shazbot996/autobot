@@ -24,6 +24,10 @@ Type=simple
 WorkingDirectory=@REPO_ROOT@
 ExecStart=@REPO_ROOT@/.venv-server/bin/python -m autobot_server
 Environment=PYTHONUNBUFFERED=1
+# cuBLAS and cuDNN come from pip wheels in .venv-server, whose lib
+# directories the loader does not search. `make server-install` fills this
+# with them; the foreground `make server-up` sets the same.
+Environment=LD_LIBRARY_PATH=@CUDA_LIBRARY_PATH@
 # The speech libraries stay off the network: the server sets these itself as
 # well, before it imports them (IS-7).
 Environment=HF_HUB_OFFLINE=1

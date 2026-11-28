@@ -18,6 +18,9 @@ provenance:
   - run: schiele/0150
     at: 2026-11-28T13:47:58.817Z
     mode: revise
+  - run: schiele/0151
+    at: 2026-11-28T13:56:44.860Z
+    mode: revise
 ---
 
 # autobot — edge control plane
@@ -27,10 +30,10 @@ The **edge control plane** is the always-on layer on the NUC that keeps listenin
 - **One capture.** A single audio capture process reads the echo-cancelled microphone and sends the same frames to every consumer.
 - **The echo canceller.** It takes autobot's own voice out of what the microphone hears.
 - **The reflex listener.** Local faster-whisper `tiny.en` runs all the time and hears the reflexes even while autobot speaks (barge-in).
-- **The reflexes.** A short, configured list of exact "autobot + phrase" commands, such as cancel, yes, no and check progress. They work with `GAMEON1` off.
+- **The reflexes.** A short, configured list of exact "autobot + phrase" commands, such as cancel, stop talking and check progress. They work with `GAMEON1` off.
 - **The session's stream.** After a wake, the session's utterances go to `GAMEON1`'s `/v1/stt`, and the NUC falls back to `tiny.en` when the server is away.
 
-A cancel really stops: the speech, the session and every request still in flight. A reflex can run a side task without interrupting the session. Nothing autobot says can set off a reflex. Rules EC-1 to EC-18 govern this layer. They build on `CN-1`, `CN-2`, WW-4, WW-6, WW-8, WW-11, TS-5, TS-11, FS-4, FS-10, FS-11, FS-12, AG-1, AG-13, AG-14, AG-15, IS-4, IS-5, IS-8, IS-15, IS-16, IS-23 and IS-24. They amend FS-4, FS-11, FS-12, AG-14, WW-8 and IS-24 as "Changes needed elsewhere" lists. The console and moving agents to tools are out of scope.
+A cancel really stops: the speech, the session and every request still in flight. A reflex can run a side task without interrupting the session. Nothing autobot says can set off a reflex. Rules EC-1 to EC-19 govern this layer. They build on `CN-1`, `CN-2`, WW-4, WW-6, WW-8, WW-11, TS-5, TS-11, FS-4, FS-10, FS-11, FS-12, AG-1, AG-13, AG-14, AG-15, IS-4, IS-5, IS-8, IS-15, IS-16, IS-23 and IS-24. They amend FS-4, FS-11, FS-12, AG-14, WW-8 and IS-24 as "Changes needed elsewhere" lists. The console and moving agents to tools are out of scope.
 
 ## Numbered rules, each with its reason
 
@@ -62,8 +65,9 @@ A cancel really stops: the speech, the session and every request still in flight
    - **The configuration.** `[audio] input_device` and `output_device` name those two nodes.
    - **No consumer reads the raw source.** The one exception is the measurement in EC-4, which is not a consumer.
    - **It stays local.** The canceller runs on the NUC and sends nothing anywhere (`CN-1`, `CN-2`).
+   - **The hardware stays.** The NUC keeps the AIRHUG 21 microphone and its current speaker. No new hardware is bought; the canceller is made to work with what is there.
 
-   Reason: sound comes from at least two processes (the listener's acknowledgement and the interface's speech). A canceller inside the sound server sees all of it as one reference, and one inside a single process could not. PipeWire is already the NUC's audio path ([audio] in `config/autobot.toml`). WebRTC's canceller copes with talk in both directions at once and with clock drift better than speexdsp. Drift matters here because the microphone is USB and the speaker is the onboard HDA output, so they run on different clocks. A microphone with hardware echo cancellation is the alternative, and that choice is left to the owner (Open Questions).
+   Reason: sound comes from at least two processes (the listener's acknowledgement and the interface's speech). A canceller inside the sound server sees all of it as one reference, and one inside a single process could not. PipeWire is already the NUC's audio path ([audio] in `config/autobot.toml`). WebRTC's canceller copes with talk in both directions at once and with clock drift better than speexdsp. Drift matters here because the microphone is USB and the speaker is the onboard HDA output, so they run on different clocks. A microphone with hardware echo cancellation is the alternative, and the owner has chosen not to buy one and to try to make the present hardware work.
 
 4. **EC-4. `make echo-check` measures the canceller on the NUC.**
    - **NUC only.** The target refuses on any other machine, as `make audio-check` does. It appears in the bare `make` summary.
@@ -98,16 +102,15 @@ A cancel really stops: the speech, the session and every request still in flight
 
    - The action's code is autobot's own. The entry is data, and a new action is new code (AG-1).
    - The loader refuses a phrase that equals a `[[routes]]` command, appears twice, or is empty.
-   - The loader refuses `confirm = true` on the `yes` and `no` actions.
 
-   Reason: the owner asked for "`[[reflexes]]` or similar", and a table of its own matches `[[routes]]` and `[[agents]]`. `CONVENTIONS.md` keeps configuration in that one file. Without the refusals, "autobot weather" could be both a reflex and a command, and a yes that needs a yes would never end.
+   Reason: the owner asked for "`[[reflexes]]` or similar", and a table of its own matches `[[routes]]` and `[[agents]]`. `CONVENTIONS.md` keeps configuration in that one file. Without the refusals, "autobot weather" could be both a reflex and a command.
 
 7. **EC-7. A reflex matches only on the whole utterance, and an utterance that matches is that reflex and nothing else.**
    - **The match.** A stretch's transcript is a reflex when, normalised as the routing rules are, it is exactly the wake phrase followed by the reflex's phrase, with nothing before or after it. The wake phrase is matched by WW-6's rule with the spaces removed, so "auto bot" counts. "Hey autobot cancel" and "tell autobot to cancel it" are not reflexes.
    - **Checked first.** Reflexes are checked before the global action keywords (AG-14) and before the routing cascade (IS-17).
    - **What a reflex utterance never becomes:**
      - a command;
-     - a confirmation's answer, except through the `yes` and `no` actions;
+     - a confirmation's answer;
      - a turn of the core agent;
      - a request to the server.
    - **The listener announces it.** It publishes a `reflex` event on `run/listener.sock` with the stretch's identifier and the action, and the face acts on it.
@@ -115,32 +118,31 @@ A cancel really stops: the speech, the session and every request still in flight
 
    Reason: exact matching on the whole utterance is what keeps conversation from setting off a reflex. Checking reflexes first is what makes them reliable when a route or a model would read the same words differently.
 
-8. **EC-8. The first reflexes.** The first four are the owner's, and the last three are suggested:
+8. **EC-8. The first reflexes.** All five are the owner's:
 
    | Phrase | Action | Kind | Effect |
    | --- | --- | --- | --- |
    | `cancel` | `cancel` | control | Ends the session and everything in flight (EC-10). |
-   | `yes` | `yes` | control | Answers yes to the confirmation that is open, even while its question is still being spoken. |
-   | `no` | `no` | control | Answers no to it in the same way. |
    | `check progress` | `progress` | side task | Says briefly what the session is doing (EC-12). |
    | `stop talking` | `quiet` | control | Stops autobot's speech at once and drops what was queued. The session goes on listening. |
    | `repeat that` | `repeat` | side task | Says the last spoken summary again. |
    | `server status` | `server` | side task | Says the inference server's state as the watcher holds it (IS-23). |
 
    - A control reflex acts on the session. A side task only reads it (EC-12).
-   - `yes` or `no` with no confirmation open does nothing beyond a detail line.
+   - `yes` and `no` are not reflexes. They answer a confirmation through the `[words]` yes and no words (EC-9).
 
-   Reason: the owner named cancel, yes, no and check progress, and asked for suggestions. `stop talking` is barge-in without losing the session. `repeat that` and `server status` are local reads that the owner would otherwise ask a model or a screen for.
+   Reason: the owner named cancel and check progress, asked for suggestions, and accepted `stop talking`, `repeat that` and `server status` as a good starting point. `stop talking` is barge-in without losing the session. `repeat that` and `server status` are local reads that the owner would otherwise ask a model or a screen for. A yes or a no is the answer to a question and not a command of its own, so it has no reflex.
 
-9. **EC-9. A reflex can require a confirmation, under the existing convention.**
-   - **The convention.** A reflex with `confirm = true` asks its `confirm_question` as AG-13's confirmation does: spoken in the local voice, shown in the summary, answered by the `[words]` yes and no words, and over after ten seconds (FS-15).
-   - **How the answer is heard.** It is taken from the reflex listener's local transcripts, so it works with `GAMEON1` off. The `yes` and `no` reflexes answer it as well.
+9. **EC-9. Every reflex asks for a confirmation by default, and all confirmations share one process and one timing.**
+   - **The convention.** A reflex with `confirm = true` asks its `confirm_question` as AG-13's confirmation does: spoken in the local voice, shown in the summary, and answered by the `[words]` yes and no words.
+   - **How the answer is heard.** It is taken from the reflex listener's local transcripts, so it works with `GAMEON1` off.
+   - **One process, one timing.** Every reflex confirmation runs through the same code and reads its timing from the same settings in `config/autobot.toml`, not from the reflex's own entry. The timing is how long the question waits for an answer and how long listening stays open after the question has been spoken. Ten seconds (FS-15) is the starting window. A change to the settings changes every confirmation at once.
    - **Effect on the session.** While the question waits, autobot's speech stops after the current sentence. A yes carries out the action. A no, or the time running out, leaves the session where it was, and the speech goes on.
-   - **Defaults.** Every reflex ships with `confirm = false`.
+   - **Defaults.** Every reflex ships with `confirm = true`.
 
-   Reason: the owner asked for confirmation per reflex "using the existing convention". AG-13 is that convention, and reusing it keeps one shape for asking.
+   Reason: the owner wants every reflex to confirm by default and the confirmation shared among them, so that the timing of each request and response window can be shaped later in one place. The window has to be quick, but not so quick that it stops listening before the owner has answered and must be tried again, and not so loose that a stray word is taken for an answer. AG-13 is the existing convention, and reusing it keeps one shape for asking.
 
-10. **EC-10. Cancel really aborts.** When the `cancel` reflex is recognised, autobot does all of this within the budget of EC-16:
+10. **EC-10. Cancel really aborts.** When the `cancel` reflex is recognised, and confirmed where it asks (EC-9), autobot does all of this within the budget of EC-16:
     - **Speech stops.** The clip playing is cut, the queued sentences are dropped, and renders not yet played are discarded.
     - **The session ends.** It returns to the root, from whatever level it stood at.
     - **Server requests are closed.** Every request of the session still in flight to `/v1/stt`, `/v1/route` or `/v1/chat` has its connection closed (EC-11).
@@ -203,14 +205,14 @@ A cancel really stops: the speech, the session and every request still in flight
 
     Reason: the owner asked for exactly this. Reflexes match only whole utterances (EC-7), so the one way autobot can set one off is to say the wake phrase and a reflex phrase together, and the scrub makes that impossible for anything synthesised.
 
-16. **EC-16. The latency budget of a reflex.** Times are measured from the last voiced frame of the reflex utterance, on the NUC, with `GAMEON1` off:
+16. **EC-16. The latency budget of a reflex.** Times are measured from the last voiced frame of the reflex utterance, on the NUC, with `GAMEON1` off. When the reflex asks first (EC-9), the budgets of the action's own rows run from the last voiced frame of the answer:
 
     | What | Budget |
     | --- | --- |
     | The reflex is recognised and its event published | within 0.9 s |
     | `cancel` or `stop talking`: autobot is silent | within 1.0 s |
     | `cancel`: the session has ended and every request's connection is closed | within 1.0 s |
-    | `yes` or `no`: the confirmation is answered | within 1.0 s |
+    | A confirmation's yes or no word is recognised and the confirmation is answered | within 1.0 s |
     | A side task's answer starts speaking, when autobot was silent | within 1.5 s |
     | The server's job slot is free after a closed chat stream (EC-11) | within 0.5 s of the close |
 
@@ -221,14 +223,21 @@ A cancel really stops: the speech, the session and every request still in flight
     - **The echo-cancelled source is missing.** The listener does not fall back to the raw microphone. It exits with status 1 and a one-line reason naming the missing node, so systemd restarts it once PipeWire provides the node. The main screen shows *listener down* with that reason.
     - **The reflex listener falls behind.** It drops its oldest frames (EC-2) and never delays the capture. The count of dropped frames is in the listener's log.
 
-    Reason: the owner asked for the fallback to be stated. The stated rule is that no consumer reads the raw microphone, and a listener that is visibly down keeps that rule, where one that quietly runs without cancellation and hears itself would not. Whether a degraded mode should exist instead is left to the owner (Open Questions).
+    Reason: the owner asked for the fallback to be stated, and chose that the listener stays down when the canceller's node is missing. The stated rule is that no consumer reads the raw microphone, and a listener that is visibly down keeps that rule, where one that quietly runs without cancellation and hears itself would not.
 
 18. **EC-18. Tests open no microphone, speaker or network.**
-    - The fan-out, the reflex match, the scrub, cancel, side tasks, barge-in and the session's choice between server and local are tested with fakes for the capture source, the transcriber, the server client and the clock.
+    - The fan-out, the reflex match, the scrub, cancel, side tasks, barge-in, the shared confirmation timing and the session's choice between server and local are tested with fakes for the capture source, the transcriber, the server client and the clock.
     - A test of cancel checks that the fake connection was closed.
     - The real canceller and the real latency are measured by `make echo-check` on the NUC (EC-4), not by `make test`.
 
     Reason: `AGENTS.md` keeps the tests free of hardware and network, and puts hardware checks in `make` targets.
+
+19. **EC-19. Everything the control plane does is shown in the game interface.**
+    - **The reflexes are on the map.** The face's detail panel, the game screen, shows the configured reflexes: each phrase, its action and whether it asks first.
+    - **A reflex heard is a game event.** When a reflex is recognised, the panel shows which one, its measured time (EC-16) and, if it asks, the open confirmation and its remaining window (EC-9).
+    - **No hidden behaviour.** A behaviour of this layer that the owner could observe, such as barge-in, a cancel or a side task's answer, has a visible effect on that screen.
+
+    Reason: the owner wants every behaviour designed here to be reflected on the screen as a game option, and the interface is the application (ADR 0006).
 
 ## Out of scope
 
@@ -244,11 +253,13 @@ A cancel really stops: the speech, the session and every request still in flight
 - **Derived (WW-4).** The session's capture works for every wake kind. This answers the open question in `ARCH.md` on where post-wake capture happens.
 - **Derived (AG-13).** A reflex's confirmation uses `confirm` and `confirm_question` with the shared `[words]` lists, as an agent's does.
 - **Derived (`[server] stt_enabled`).** Server speech-to-text stays off until the owner sets the flag. `CN-1` now allows it.
-- **Default.** The table is `[[reflexes]]`, beside `[[routes]]` and `[[agents]]`. For now its entries are edited in the file, and no screen of this spec edits them.
+- **Default.** The table is `[[reflexes]]`, beside `[[routes]]` and `[[agents]]`. For now its entries are edited in the file, and the game interface shows them (EC-19) without editing them.
 - **Default.** The canceller is PipeWire's echo-cancel module with the WebRTC backend, because playback comes from several processes and PipeWire is already in the path.
 - **Default.** The check is `make echo-check`, with the thresholds of EC-4: 20 dB lower, no reflexes caused by the playback in ten plays, and nine of ten recognised over it.
 - **Default.** Matching is strict: no "hey" or "yo" before the wake phrase. This keeps false triggers rare, and the owner can add a phrase.
-- **Default.** `stop talking`, `repeat that` and `server status` are suggested additions to the owner's four reflexes.
+- **Owner's decision.** The first reflexes are `cancel`, `check progress`, `stop talking`, `repeat that` and `server status`. `yes` and `no` are not reflexes. The owner has no further reflexes to add yet.
+- **Owner's decision.** Every reflex defaults to `confirm = true`, and all confirmations share one process and one timing setting (EC-9).
+- **Owner's decision.** The NUC keeps its present microphone and speaker (EC-3), and the listener stays down when the echo-cancelled source is missing (EC-17).
 - **Default.** A cancel is shown and not spoken, and the spoken keyword `cancel` keeps AG-14's one level back.
 - **Default.** A reflex said outside a session ends the session its own wake opened.
 - **Default.** The latency figures of EC-16 are taken from IS-4's 1.0 s for a local answer.
@@ -263,11 +274,11 @@ A cancel really stops: the speech, the session and every request still in flight
 
   The STT entry ("always local"), the faster-whisper entry and the inference server entry ("IS-1 to IS-14") also need updating for `CN-1` as amended.
 - **docs/context/ARCH.md.** Add the edge control plane as a part. Record the listener as the one capture process, with the consumers of EC-2 and the echo canceller in PipeWire. Add the `reflex` event to the socket seam. "Control plane" now names this layer, so the rules layer stops being called the control plane. Close the open question on capture after the wake (EC-14).
-- **docs/context/SCHEMA.md.** Add the `[[reflexes]]` table (`phrase`, `action`, `confirm`, `confirm_question`) and the `reflex` event on `run/listener.sock` (stretch identifier, action, time). Record that `[audio] input_device` and `output_device` name the echo-cancel nodes.
-- **docs/context/INFRASTRUCTURE.md.** Record the PipeWire echo-cancel configuration on the NUC, with its source and sink node names, and the microphone hardware decision.
+- **docs/context/SCHEMA.md.** Add the `[[reflexes]]` table (`phrase`, `action`, `confirm`, `confirm_question`) and the `reflex` event on `run/listener.sock` (stretch identifier, action, time). Add the shared confirmation timing settings (EC-9). Record that `[audio] input_device` and `output_device` name the echo-cancel nodes.
+- **docs/context/INFRASTRUCTURE.md.** Record the PipeWire echo-cancel configuration on the NUC, with its source and sink node names, and that the AIRHUG 21 stays.
 - **docs/specs/active/autobot-gpu-inference-server-SPEC.md.** Add that a closed connection cancels and frees the job slot within 0.5 s (EC-11), as an amendment to IS-24. Drop IS-8's "takes effect once" condition, which now holds. IS-15 gains: a stretch in which a wake fired is never sent.
-- **docs/specs/active/autobot-the-face-SPEC.md.** FS-4: the meter reads the listener's levels, not its own capture. FS-11: the echo records from the listener's capture. FS-12: the hold no longer silences the reflex listener (EC-13).
-- **docs/specs/active/autobot-agents-and-the-agent-tree-SPEC.md.** AG-13: a confirmation is also answered by the `yes` and `no` reflexes, even over its question. AG-14: the reflex `cancel` ends the session, while the spoken keyword still goes back one level. AG-12: post-wake utterances may go to `GAMEON1`.
+- **docs/specs/active/autobot-the-face-SPEC.md.** FS-4: the meter reads the listener's levels, not its own capture. FS-11: the echo records from the listener's capture. FS-12: the hold no longer silences the reflex listener (EC-13). Add that the detail panel shows the reflexes and the reflexes heard, with the open confirmation and its window (EC-19).
+- **docs/specs/active/autobot-agents-and-the-agent-tree-SPEC.md.** AG-13: a reflex's confirmation uses the same process and the same timing settings (EC-9). AG-14: the reflex `cancel` ends the session, while the spoken keyword still goes back one level. AG-12: post-wake utterances may go to `GAMEON1`.
 - **docs/specs/active/wake-word-listener-SPEC.md.** WW-4: capture after the wake for every kind (EC-14). WW-8: the reflex listener still hears during the acknowledgement. Close its open question on the end of the speech after a wake.
 - **docs/context/CONSTRAINTS.md.** Its open question on a wake phrase and a command in one utterance is answered by EC-14: that utterance stays on the NUC.
 - **AGENTS.md.** Add `make echo-check` to the targets, as NUC-only beside `make audio-check`. Mention the reflexes and `[[reflexes]]`.
@@ -275,7 +286,5 @@ A cancel really stops: the speech, the session and every request still in flight
 
 ## Open Questions
 
-- **Microphone hardware.** Should the NUC keep the AIRHUG 21 with the PipeWire canceller, or move to a USB speakerphone with hardware echo cancellation, where the microphone and speaker share one device and one clock? Recommended: keep the AIRHUG 21 and run `make echo-check`, and buy a speakerphone only if it fails, because it costs nothing to try and the check says plainly whether it is enough.
-- **The reflex list.** Should the first set be the owner's four (`cancel`, `yes`, `no`, `check progress`) plus the suggested `stop talking`, `repeat that` and `server status`, or only the four? Recommended: all seven, because the three additions are local, read-only or quiet, and cover barge-in without ending the session.
-- **Confirmation per reflex.** Which reflexes, if any, should ask before acting? Recommended: none, because a stop that asks first is slow, and the side tasks only read.
-- **No echo-cancelled source.** When the canceller's node is missing, should the listener stay down (EC-17), or run on the raw microphone in a degraded mode, deaf while autobot speaks as today's hold makes it? Recommended: stay down, because the owner's rule is that no consumer reads the raw microphone, and a listener that is down is visible on the main screen.
+- **Cancel and stop talking behind a confirmation.** Every reflex asks first by default (EC-9), which includes `cancel` and `stop talking`, whose point is to be fast. Should those two ship with `confirm = false`, or ask like the rest? The owner said all reflexes default to asking; whether these two are an exception was not said. Recommended: keep them asking only if the shared window proves quick enough, and otherwise set those two to `confirm = false`, because a stop that asks first is slow.
+- **The confirmation timing.** What should the starting values of the shared window be (how long the question waits, how long listening stays open after it is spoken), beyond the ten seconds of FS-15? The owner said the timing will be tuned later, and wants it quick but not so short that the owner has to try again. Recommended: start at ten seconds and tune from use.
